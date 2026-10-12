@@ -115,18 +115,22 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 
 实测（引导开启、无人职守）：模型自建 5 节点图（4 独立 + 1 依赖），先后两次 `dispatch`（4 并行 → 1），全部完成。**不加引导时它根本不用这套工具**。
 
-## 10. 验收用例
+## 10. 验收用例（已在真环境跑过）
 
-- [x] AC1：多独立节点一次 `dispatch` 并行执行、结果全部回填 —— e2e：4 节点一波并行（big test）+ 2 节点一波（scripted）。
-- [x] AC2：依赖门控、分波执行、不早跑 —— 单测 `ready_set_respects_dependencies`；e2e 三波 `set(1)→dispatch→addNodes(2)→dispatch→addNodes(1)→dispatch`。
-- [x] AC3：节点 `failed` → 下游 `skipped`、不空转 —— 单测 `failed_dependency_skips_downstream_transitively` + `dispatch` 的 no-progress 守卫。
-- [x] AC4：含环的图被拒 —— 单测 `rejects_cycles`。
-- [x] AC5：超 `timeoutSeconds` 被 kill 标 `failed` —— 与取消同一条 `kill_and_reap` 路径（单测覆盖 kill）。
-- [x] AC6：`RPI_MAX_TURNS_PER_RUN` 生效 —— 实测子代理撞 `maxTurns=2` 提前停（也因此暴露“假成功”，已用 `expectFile` 验收修复）。
-- [ ] AC7：编排层 `deadlineMs` 到期 auto-pause —— **不在本扩展**，由 `rpi-goal` 承担。
-- [x] AC8：取消 → 在跑子进程全被 kill、无孤儿 —— **e2e（RPC abort）**：子 rpi 与孙 `sleep` 均被杀。
+一次无人职守的验收脚本（真 provider、真子进程、`rpi -p`）逐条跑：
+
+- [x] AC1：多独立节点一波并行 —— e2e：3 个独立节点一次 `dispatch(maxParallel=3)` 全部 `done`，3 个随机 nonce 全部回填。
+- [x] AC2：依赖门控、分波、不早跑 —— e2e：链 `a→b→c` 三波各起 1 个（`W1=a W2=b W3=c`），a/b/c 文件内容正确。
+- [x] AC3：节点 `failed` → 下游 `skipped`、不空转 —— e2e：`bad`（声明 `expectFile` 却不产出）→ `failed`，依赖它的 `dep` 从未运行。
+- [x] AC4：含环的图被拒 —— e2e：工具返回 `cycle detected among: a, b`。
+- [x] AC5：超 `timeoutSeconds` 被 kill 标 `failed` —— e2e：节点 `timeoutSeconds=10` 跑 `sleep 60` → 13s 内标 `failed`。
+- [x] AC6：`RPI_MAX_TURNS_PER_RUN` 生效 —— e2e：`maxTurns=2` 的子代理做不完多步任务，`expectFile` 未产出 → `failed`（也即治好了“截断仍算成功”的假成功）。
+- [ ] AC7：编排层 `deadlineMs` 到期 auto-pause —— **搁置**（不在本扩展，推给 `rpi-goal`）。
+- [x] AC8：取消 → 在跑子进程全被 kill、无孤儿 —— e2e（`rpi --mode rpc` 发 `abort`）：子 rpi 与孙 `sleep` 均被杀。
 - [x] AC9（**砍掉**）：不做分支重放——会话切换即清空图，恢复还是重来由人决定（设计决定，非缺陷）。
-- [x] AC10：子进程默认无编排工具（无递归）—— 启动参数 `--exclude-tools subagent,plan,dispatch`（单测）+ 引导跳过 `RPI_ORCHESTRATOR_SUBAGENT=1`。
+- [x] AC10：子进程默认无编排工具（无递归）—— e2e：子代理尝试调 `plan` → 回报 `PLAN_ABSENT`。
+
+**结果：范围内 8/8 通过**（AC1–AC6、AC8、AC10）；AC7 搁置、AC9 砍掉。
 
 ## 11. 参考实现锚点
 
