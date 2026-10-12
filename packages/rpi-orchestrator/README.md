@@ -9,9 +9,10 @@ Design and staged plan: [`DESIGN.md`](DESIGN.md).
 
 ## Status
 
-Three tools share one session-scoped task graph. The graph is carried in
-`details` on every `plan`/`dispatch` result and rebuilt by replaying the current
-session branch, so it survives `/tree` navigation and forks.
+Three tools share one in-memory task graph. It lives for the life of a run and
+is cleared when the session is switched; deciding whether to resume from history
+or start over is left to the human. `plan`/`dispatch` results still carry the
+graph in `details` for inspection.
 
 ### `subagent` — one bounded delegation
 

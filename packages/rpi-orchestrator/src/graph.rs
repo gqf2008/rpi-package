@@ -32,17 +32,6 @@ impl Status {
             Status::Skipped => "skipped",
         }
     }
-
-    pub fn parse(value: &str) -> Option<Status> {
-        match value {
-            "pending" => Some(Status::Pending),
-            "running" => Some(Status::Running),
-            "done" | "completed" => Some(Status::Done),
-            "failed" => Some(Status::Failed),
-            "skipped" => Some(Status::Skipped),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -165,29 +154,6 @@ impl Graph {
         let graph = Graph { nodes };
         graph.validate()?;
         Ok(graph)
-    }
-
-    pub fn from_details(value: &Value) -> Option<Graph> {
-        let array = value.get("nodes")?.as_array()?;
-        let mut nodes = Vec::with_capacity(array.len());
-        for item in array {
-            let node = Node::from_value(item).ok()?;
-            let status = item
-                .get("status")
-                .and_then(Value::as_str)
-                .and_then(Status::parse)
-                .unwrap_or(Status::Pending);
-            let result = item
-                .get("result")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            nodes.push(Node {
-                status,
-                result,
-                ..node
-            });
-        }
-        Some(Graph { nodes })
     }
 
     pub fn to_details(&self) -> Value {
@@ -440,15 +406,5 @@ mod tests {
         assert_eq!(g.get("b").unwrap().status, Status::Skipped);
         assert_eq!(g.get("c").unwrap().status, Status::Skipped);
         assert!(!g.has_pending());
-    }
-
-    #[test]
-    fn details_round_trip_preserves_status() {
-        let mut g = graph(json!([{"id": "a", "task": "x"}]));
-        g.get_mut("a").unwrap().status = Status::Done;
-        g.get_mut("a").unwrap().result = Some("ok".into());
-        let restored = Graph::from_details(&g.to_details()).unwrap();
-        assert_eq!(restored.get("a").unwrap().status, Status::Done);
-        assert_eq!(restored.get("a").unwrap().result.as_deref(), Some("ok"));
     }
 }

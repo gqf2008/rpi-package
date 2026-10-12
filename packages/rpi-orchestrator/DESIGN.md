@@ -81,7 +81,7 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 
 ## 6. 状态与预算
 
-**状态存储**：照 `rpi-todo` —— 写进 tool result 的 `details`，按当前分支重放重建（天然支持 fork / 回退 / 树导航）。**不用外部 JSON 文件**。
+**状态存储**：单次进程内存（`OnceLock<Mutex<Graph>>`），**不落文件、不做分支重放**。**会话切换/重启即清空**——是继续还是重来由人决定。`plan`/`dispatch` 的结果仍带 `details` 供查看。
 
 **双层预算**：
 - 编排层：照 `rpi-goal` 的 `maxTurns` + `deadlineMs`，超限 auto-pause + 注入提示。
@@ -111,7 +111,7 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 ## 9. 引导编排层生成 DAG
 
 - **已实现（opt-in）**：`before_agent_start` 往 system prompt 追加一段“多步/可并行任务 → 先 plan 建图、dispatch 一波波推进、按结果 update 改图”的引导。**默认关闭**，设 `RPI_ORCHESTRATOR_GUIDE=1` 才注入（本扩展全局安装，无条件注入会影响所有会话）。子代理不注入（`RPI_ORCHESTRATOR_SUBAGENT=1` 标记）。
-- 未做：每轮把**当前图状态**单独注入 context——目前依赖工具结果本身留在 context 里（`plan`/`dispatch` 的 `details` 会重放），实测够用。
+- 未做：每轮把**当前图状态**单独注入 context——目前依赖工具结果本身留在 context 里（`plan`/`dispatch` 的输出含图状态），实测够用。
 
 实测（引导开启、无人职守）：模型自建 5 节点图（4 独立 + 1 依赖），先后两次 `dispatch`（4 并行 → 1），全部完成。**不加引导时它根本不用这套工具**。
 
@@ -125,7 +125,7 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 - [x] AC6：`RPI_MAX_TURNS_PER_RUN` 生效 —— 实测子代理撞 `maxTurns=2` 提前停（也因此暴露“假成功”，已用 `expectFile` 验收修复）。
 - [ ] AC7：编排层 `deadlineMs` 到期 auto-pause —— **不在本扩展**，由 `rpi-goal` 承担。
 - [x] AC8：取消 → 在跑子进程全被 kill、无孤儿 —— **e2e（RPC abort）**：子 rpi 与孙 `sleep` 均被杀。
-- [ ] AC9：fork/树导航后图状态按分支重放 —— 机制已实现（`SessionStart`/`SessionTree` 重放 `details`），**未做 e2e**。
+- [x] AC9（**砍掉**）：不做分支重放——会话切换即清空图，恢复还是重来由人决定（设计决定，非缺陷）。
 - [x] AC10：子进程默认无编排工具（无递归）—— 启动参数 `--exclude-tools subagent,plan,dispatch`（单测）+ 引导跳过 `RPI_ORCHESTRATOR_SUBAGENT=1`。
 
 ## 11. 参考实现锚点
