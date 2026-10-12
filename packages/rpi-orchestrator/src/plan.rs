@@ -8,12 +8,14 @@
 //! completion is only ever written by `dispatch`, so the plan cannot be
 //! "completed" by hand. `reset` is the one state edit the model keeps.
 
+use crate::control::Control;
 use crate::graph::{Graph, Node, Status};
 use crate::graph_state;
-use crate::kit::result_with_details;
+use crate::kit::{result_with_details, Progress};
 use serde_json::Value;
 
-pub fn plan(params: &Value) -> Result<String, String> {
+pub fn plan(params: &Value, control: &Control, _progress: &Progress) -> Result<String, String> {
+    control.check()?;
     let action = params
         .get("action")
         .and_then(Value::as_str)

@@ -6,9 +6,10 @@
 //! so the orchestrator sees the results and can reshape the graph before the
 //! next call.
 
+use crate::control::Control;
 use crate::graph::{Graph, Status};
 use crate::graph_state;
-use crate::kit::result_with_details;
+use crate::kit::{progress, result_with_details, Progress};
 use crate::spawn;
 use serde_json::Value;
 
@@ -16,7 +17,12 @@ const DEFAULT_MAX_PARALLEL: usize = 4;
 const MAX_PARALLEL_CAP: usize = 16;
 const RESULT_SUMMARY_BYTES: usize = 2_000;
 
-pub fn dispatch(params: &Value) -> Result<String, String> {
+pub fn dispatch(
+    params: &Value,
+    control: &Control,
+    progress_tx: &Progress,
+) -> Result<String, String> {
+    control.check()?;
     let max_parallel = params
         .get("maxParallel")
         .and_then(Value::as_u64)
@@ -44,14 +50,14 @@ pub fn dispatch(params: &Value) -> Result<String, String> {
 
     for id in &ready {
         if let Some(node) = guard.get_mut(id) {
-            node.status = crate::graph::Status::Running;
+            node.status = Status::Running;
         }
     }
 
     // Snapshot before releasing the lock into the wave: the children run for a
     // long time and must not hold the state lock.
     let snapshot = guard.clone();
-    let outcomes = run_wave(&snapshot, &ready, max_parallel);
+    let outcomes = run_wave(&snapshot, &ready, max_parallel, control, progress_tx);
 
     for (id, outcome) in outcomes {
         // Acceptance is checked only when the child reported success: a child that
@@ -85,6 +91,64 @@ pub fn dispatch(params: &Value) -> Result<String, String> {
 
     let text = format!("dispatched {} node(s)\n\n{}", ready.len(), guard.render());
     Ok(result_with_details(&text, guard.to_details()))
+}
+
+/// Run `ids` with at most `max_parallel` children at a time, preserving input
+/// order in the returned pairs.
+fn run_wave(
+    graph: &Graph,
+    ids: &[String],
+    max_parallel: usize,
+    control: &Control,
+    progress_tx: &Progress,
+) -> Vec<(String, Result<String, String>)> {
+    let mut out = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(max_parallel.max(1)) {
+        progress(
+            progress_tx,
+            &format!(
+                "[dispatch] running {} node(s): {}",
+                chunk.len(),
+                chunk.join(", ")
+            ),
+        );
+        let chunk_results = std::thread::scope(|scope| {
+            let handles: Vec<(String, _)> = chunk
+                .iter()
+                .map(|id| {
+                    let node = graph.get(id).cloned().expect("ready node exists");
+                    let id = id.clone();
+                    let control = control.clone();
+                    let handle = scope.spawn(move || {
+                        spawn::run(
+                            &node.task,
+                            node.max_turns,
+                            node.timeout_secs,
+                            node.provider.as_deref(),
+                            node.model.as_deref(),
+                            &control,
+                        )
+                    });
+                    (id, handle)
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|(id, handle)| {
+                    let outcome = handle
+                        .join()
+                        .unwrap_or_else(|_| Err("subagent thread panicked".into()));
+                    (id, outcome)
+                })
+                .collect::<Vec<_>>()
+        });
+        out.extend(chunk_results);
+        // A cancelled wave must not start the next chunk.
+        if control.is_cancelled() {
+            break;
+        }
+    }
+    out
 }
 
 /// Check a node's declared acceptance criteria after its child exits.
@@ -126,48 +190,6 @@ fn run_verify_command(command: &str) -> Result<bool, String> {
     }
     .map_err(|err| format!("could not run verification command: {err}"))?;
     Ok(status.success())
-}
-
-/// Run `ids` with at most `max_parallel` children at a time, preserving input
-/// order in the returned pairs.
-fn run_wave(
-    graph: &Graph,
-    ids: &[String],
-    max_parallel: usize,
-) -> Vec<(String, Result<String, String>)> {
-    let mut out = Vec::with_capacity(ids.len());
-    for chunk in ids.chunks(max_parallel.max(1)) {
-        let chunk_results = std::thread::scope(|scope| {
-            let handles: Vec<(String, _)> = chunk
-                .iter()
-                .map(|id| {
-                    let node = graph.get(id).cloned().expect("ready node exists");
-                    let id = id.clone();
-                    let handle = scope.spawn(move || {
-                        spawn::run(
-                            &node.task,
-                            node.max_turns,
-                            node.timeout_secs,
-                            node.provider.as_deref(),
-                            node.model.as_deref(),
-                        )
-                    });
-                    (id, handle)
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|(id, handle)| {
-                    let outcome = handle
-                        .join()
-                        .unwrap_or_else(|_| Err("subagent thread panicked".into()));
-                    (id, outcome)
-                })
-                .collect::<Vec<_>>()
-        });
-        out.extend(chunk_results);
-    }
-    out
 }
 
 fn summarize(text: &str) -> String {

@@ -13,6 +13,7 @@
 //! rebuilt by replaying the current session branch (`GetSessionBranch`) exactly
 //! like `rpi-todo`. Design and stages: `DESIGN.md`.
 
+mod control;
 mod dispatch;
 mod graph;
 mod kit;

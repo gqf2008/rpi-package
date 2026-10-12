@@ -4,15 +4,23 @@
 //! usable on its own — the host already parallelises tool calls, so a turn that
 //! issues several `subagent` calls already runs them concurrently.
 
+use crate::control::Control;
 use crate::graph::{
     DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECS, MAX_MAX_TURNS, MAX_TASK_BYTES, MAX_TIMEOUT_SECS,
     MIN_TIMEOUT_SECS,
 };
-use crate::kit::{content_only, optional_string, optional_trimmed, string_param};
+use crate::kit::{
+    content_only, optional_string, optional_trimmed, progress, string_param, Progress,
+};
 use crate::spawn;
 use serde_json::Value;
 
-pub fn subagent(params: &Value) -> Result<String, String> {
+pub fn subagent(
+    params: &Value,
+    control: &Control,
+    progress_tx: &Progress,
+) -> Result<String, String> {
+    control.check()?;
     let task = string_param(params, "task")?;
     if task.trim().is_empty() {
         return Err("task must not be empty".into());
@@ -39,12 +47,14 @@ pub fn subagent(params: &Value) -> Result<String, String> {
     let provider = optional_trimmed(params, "provider");
     let model = optional_trimmed(params, "model");
 
+    progress(progress_tx, &format!("[subagent] running (role={role})…"));
     let output = spawn::run(
         &task,
         max_turns,
         timeout_secs,
         provider.as_deref(),
         model.as_deref(),
+        control,
     )?;
     Ok(content_only(&format!(
         "[subagent role={role} turns<={max_turns} timeout={timeout_secs}s provider={} model={}]\n{output}",
@@ -57,15 +67,21 @@ pub fn subagent(params: &Value) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    fn run(params: &Value) -> Result<String, String> {
+        let control = Control::default();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        subagent(params, &control, &tx)
+    }
+
     #[test]
     fn rejects_missing_or_empty_task() {
-        assert!(subagent(&serde_json::json!({})).is_err());
-        assert!(subagent(&serde_json::json!({ "task": "   " })).is_err());
+        assert!(run(&serde_json::json!({})).is_err());
+        assert!(run(&serde_json::json!({ "task": "   " })).is_err());
     }
 
     #[test]
     fn rejects_oversized_task() {
         let task = "x".repeat(MAX_TASK_BYTES + 1);
-        assert!(subagent(&serde_json::json!({ "task": task })).is_err());
+        assert!(run(&serde_json::json!({ "task": task })).is_err());
     }
 }

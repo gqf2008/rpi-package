@@ -102,11 +102,11 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 - [x] **并发上限**：`maxParallel`（默认 4、上限 16）。
 - [x] **递归守卫**：子进程 `--exclude-tools subagent,plan,dispatch`，并打 `RPI_ORCHESTRATOR_SUBAGENT=1` 标记。
 - [x] **输出截断**：子进程 stdout 截断后再回填（40KB），节点结果摘要截到 2KB。
-- [ ] **取消贯通**：把 `execute` 的 `CancellationToken` 接到子进程 kill。**未做**：当前 builder 同步阻塞，取消标志要等 builder 返回才被看到。
+- [x] **取消贯通**：工具 builder 改到工作线程（`poll` 非阻塞），`cancel`/`destroy` 置位 `Control`；`spawn` 等待循环每 100ms 检查 `Control` 并 `kill` 子进程，`destroy` 不持锁 join（单测 `cancellation_kills_a_running_child` 覆盖）。**已知宿主限制**：print 模式的 SIGINT 不会触发 run 取消（`ctrl_c` 只在 server / plugin-stdio 分支安装，`rpi-cli/src/app.rs:464`），所以只有 TUI Ctrl+C / RPC abort 才会走到这条取消链路。
 - [x] **配置透传**：子进程 `provider`/`model` 通过工具入参透传（父进程的 `--provider/--model` 不会被自动继承；宿主未暴露当前 model，扩展拿不到，故由调用方给出）。
 - [x] **完成只由引擎写**：`plan` 无 `status` 写入，`done`/`failed` 只能由 `dispatch` 写 → 堵住“模型谎报完成”。
 - [x] **逐节点验收**：子代理退出后检查 `expectFile`（文件须存在）/`verify`（命令须 exit 0），不满足标 `failed` → 堵住“子代理撞轮数上限仍 exit 0 被记为 done”的假成功。
-- [ ] **可观测**：子代理进度经 `StepResult::pending` 转 TUI。**未做**（同取消：当前同步 builder）。
+- [x] **可观测**：`poll` 非阻塞返回 `StepResult::pending(progress)`；`subagent` 报 “running”，`dispatch` 每并发块报 “running N node(s): …”。
 
 ## 9. 引导编排层生成 DAG
 

@@ -13,9 +13,11 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use wait_timeout::ChildExt;
+
+use crate::control::Control;
 
 /// Tools this package registers. Excluded from the child's tool set so a
 /// subagent cannot recursively orchestrate (design §8 "递归守卫").
@@ -30,6 +32,10 @@ pub const MAX_TURNS_ENV: &str = "RPI_MAX_TURNS_PER_RUN";
 /// Marker set on the child so the orchestrator guidance is not injected into a
 /// subagent (which does not have `plan`/`dispatch`).
 pub const SUBAGENT_ENV: &str = "RPI_ORCHESTRATOR_SUBAGENT";
+
+/// How often the wait loop re-checks cancellation/timeout. Bounds how long a
+/// cancelled call can keep a child alive.
+const POLL_SLICE: Duration = Duration::from_millis(100);
 
 /// Build the child command. Separate from `run` so it is unit-testable without
 /// spawning anything.
@@ -82,19 +88,30 @@ pub fn truncate_output(mut text: String) -> String {
 }
 
 /// Run one delegation using the current executable as the child `rpi`.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     task: &str,
     max_turns: u64,
     timeout_secs: u64,
     provider: Option<&str>,
     model: Option<&str>,
+    control: &Control,
 ) -> Result<String, String> {
     let exe = std::env::current_exe()
         .map_err(|err| format!("cannot resolve the rpi executable: {err}"))?;
-    run_with_exe(&exe, task, max_turns, timeout_secs, provider, model)
+    run_with_exe(
+        &exe,
+        task,
+        max_turns,
+        timeout_secs,
+        provider,
+        model,
+        control,
+    )
 }
 
 /// Run one delegation with an explicit executable (test seam).
+#[allow(clippy::too_many_arguments)]
 pub fn run_with_exe(
     exe: &Path,
     task: &str,
@@ -102,7 +119,10 @@ pub fn run_with_exe(
     timeout_secs: u64,
     provider: Option<&str>,
     model: Option<&str>,
+    control: &Control,
 ) -> Result<String, String> {
+    // Fail before launching anything if already cancelled.
+    control.check()?;
     let mut child = child_command(exe, max_turns, provider, model)
         .spawn()
         .map_err(|err| format!("failed to start subagent `{}`: {err}", exe.display()))?;
@@ -114,17 +134,28 @@ pub fn run_with_exe(
 
     write_stdin(&mut child, task);
 
-    match child.wait_timeout(Duration::from_secs(timeout_secs)) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            let _ = child.kill();
-            let _ = child.wait();
+    // Wait in slices so cancellation and the wall-clock deadline are both observed
+    // while the child is still running.
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        if control.is_cancelled() {
+            kill_and_reap(&mut child);
+            return Err("subagent cancelled".into());
+        }
+        if Instant::now() >= deadline {
+            kill_and_reap(&mut child);
             return Err(format!("subagent timed out after {timeout_secs}s"));
         }
-        Err(err) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("failed while waiting for subagent: {err}"));
+        let slice = deadline
+            .saturating_duration_since(Instant::now())
+            .min(POLL_SLICE);
+        match child.wait_timeout(slice) {
+            Ok(Some(_)) => break,
+            Ok(None) => continue,
+            Err(err) => {
+                kill_and_reap(&mut child);
+                return Err(format!("failed while waiting for subagent: {err}"));
+            }
         }
     }
 
@@ -146,6 +177,11 @@ pub fn run_with_exe(
         ));
     }
     Ok(text)
+}
+
+fn kill_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn write_stdin(child: &mut Child, task: &str) {
@@ -250,5 +286,62 @@ mod tests {
         assert!(out.starts_with('あ'));
         assert!(out.ends_with("[subagent output truncated]"));
         assert!(out.len() <= MAX_OUTPUT_BYTES + "\n[subagent output truncated]".len());
+    }
+
+    #[test]
+    fn cancelled_control_aborts_the_call() {
+        // A pre-cancelled control aborts before any child is launched, so this
+        // holds even where the fake executable path does not exist.
+        let control = Control::default();
+        control.cancel();
+        let err = run_with_exe(
+            Path::new("/nonexistent/orchestrator-child"),
+            "ignored",
+            8,
+            5,
+            None,
+            None,
+            &control,
+        )
+        .unwrap_err();
+        assert!(err.contains("cancelled"), "got: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_kills_a_running_child() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // A stand-in child that ignores our args and blocks, so the wait loop has
+        // something to kill. `exec` makes the script process become the sleeper,
+        // so killing the direct child leaves no orphan.
+        let script = std::env::temp_dir().join(format!("orch-cancel-{}.sh", std::process::id()));
+        {
+            let mut file = std::fs::File::create(&script).unwrap();
+            writeln!(file, "#!/bin/sh").unwrap();
+            writeln!(file, "exec sleep 30").unwrap();
+        }
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let control = Control::default();
+        let canceller = control.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            canceller.cancel();
+        });
+        let start = Instant::now();
+        let err = run_with_exe(&script, "ignored", 8, 30, None, None, &control).unwrap_err();
+        let elapsed = start.elapsed();
+        let _ = handle.join();
+        let _ = std::fs::remove_file(&script);
+
+        assert!(err.contains("cancelled"), "got: {err}");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "cancel took too long: {elapsed:?}"
+        );
     }
 }

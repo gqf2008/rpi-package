@@ -59,7 +59,10 @@ Guards (all enforced in code, not asked of the model):
 - **per-node acceptance**: after a child exits successfully, a node that declared
   `expectFile` must have produced it, and one that declared `verify` must pass
   its shell command — otherwise the node is `failed`. Without this a child that
-  hit its turn cap still exits 0 and would be recorded as `done`.
+  hit its turn cap still exits 0 and would be recorded as `done`;
+- **non-blocking and cancellable**: each tool's builder runs on a worker thread,
+  so `poll` never blocks. Progress streams as a pending partial (per wave for
+  `dispatch`), and cancelling the run kills in-flight children within ~100 ms.
 
 ### Provider / model passthrough
 
