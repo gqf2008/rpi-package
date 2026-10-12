@@ -4,6 +4,7 @@ members = [
     "packages/rpi-mcp-adapter",
     "packages/rpi-subagents",
     "packages/rpi-lens",
+    "packages/rpi-orchestrator",
     "packages/rpi-todo",
     "packages/rpi-goal",
     "packages/rpi-goal",

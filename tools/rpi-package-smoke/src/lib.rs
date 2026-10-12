@@ -40,12 +40,13 @@ mod tests {
             "websearch",
             "webfetch",
             "im_message_server",
+            "subagent",
         ]);
         assert_eq!(names, expected);
         assert_eq!(
             session.loaded_paths().len(),
-            12,
-            "all twelve cdylibs should load"
+            13,
+            "all thirteen cdylibs should load"
         );
         let tool = snapshot
             .tools()
