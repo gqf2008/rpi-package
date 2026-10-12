@@ -5,7 +5,7 @@
 > - 未来若要正式贡献：按 `pi-rust/rpi-package` 的 feature request 模板建**一个**批次 issue，并附本文件与验证结果。
 > - 归属路由依据：`pi-rust/CONTRIBUTING.md` —— “Extensions — publish `cdylib` extensions in `pi-rust/rpi-package`；ABI/loader 的问题才归 pi-rust”。
 >
-> 状态：阶段1（单节点冒烟骨架）实现中 · 负责人：gqf2008 · worktree：`rpi-package-wt-orchestrator` · 跟踪：https://github.com/gqf2008/rpi-package/issues/1
+> 状态：阶段1 + 阶段2 已实现，单节点与 DAG 两波 e2e 均通过 · 负责人：gqf2008 · worktree：`rpi-package-wt-orchestrator` · 跟踪：https://github.com/gqf2008/rpi-package/issues/1
 
 ---
 
@@ -89,8 +89,9 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 
 ## 7. 阶段
 
-- **阶段一（MVP，建议先做）**：`plan` + `dispatch`（一波一同步）+ 双层预算 + 守卫。可跑通“拆图 → 并行一波 → 结果回流 → 改图 → 下一波”。
-- **阶段二（可选）**：动态图——`dispatch` 返回进行中句柄，后续轮询并随时改图（`StepResult::pending` 已支持进度流式）。
+- **阶段一（已实现）**：`plan` + `dispatch`（一波一同步）+ 环/无进展/递归守卫 + 子代理级预算（`RPI_MAX_TURNS_PER_RUN` + 宿主超时 kill）。已跑通“拆图 → 并行一波 → 结果回流 → 改图 → 下一波”。
+  - **编排层自身预算（轮数/deadline）未在本扩展实现**：由 `rpi-goal` 的 `maxTurns`/`deadlineMs` 承担（同进程内可叠加使用）。
+- **阶段二（未做，可选）**：动态图——`dispatch` 返回进行中句柄，后续轮询并随时改图（`StepResult::pending` 已支持进度流式）。
 
 ## 8. 守卫清单（必须，否则一定出事）
 

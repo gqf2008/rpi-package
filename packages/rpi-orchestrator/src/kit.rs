@@ -1,77 +1,14 @@
-//! Package-local ABI lifecycle helpers.
-#![allow(dead_code)]
+//! Package-local ABI helpers and the per-tool entry boilerplate.
 //!
-//! This file is intentionally vendored so the crate can be published and built
-//! independently before any other package in this workspace exists on crates.io.
+//! Every tool needs the same `execute` / `poll` / `cancel` / `destroy` quartet
+//! plus its own `ToolHandles` registry, so this crate keeps that plumbing in one
+//! macro ([`tool_entry!`]) and one module instead of vendoring it per tool.
+#![allow(dead_code)]
 
-use rpi_plugin_sdk::handles::ToolHandles;
-use std::ffi::c_void;
-use std::sync::atomic::Ordering;
-
-use rpi_plugin_sdk::{FreeStringFn, StbString, StepHandle, StepResult, ToolPartialCb};
+use rpi_plugin_sdk::StbString;
 use serde_json::Value;
 
-pub type Builder = fn(&Value) -> Result<String, String>;
-
-static HANDLES: ToolHandles<Drive> = ToolHandles::new();
-
-struct Drive {
-    params: Value,
-    builder: Builder,
-    completed: bool,
-}
-
-pub fn execute(
-    params: StbString,
-    free_params: Option<FreeStringFn>,
-    builder: Builder,
-) -> StepHandle {
-    let text = params.to_string_lossy();
-    params.free_with(free_params);
-    let params = serde_json::from_str(&text).unwrap_or(Value::Null);
-    HANDLES.insert(Drive {
-        params,
-        builder,
-        completed: false,
-    })
-}
-
-pub fn poll(handle: StepHandle, _: Option<ToolPartialCb>, _: *mut c_void) -> StepResult {
-    if handle.is_null() {
-        return StepResult::err(StbString::from_string("null package handle".into()));
-    }
-    let Some(entry) = HANDLES.get(handle) else {
-        return StepResult::err(StbString::from_string(
-            "invalid or destroyed tool handle".into(),
-        ));
-    };
-    let mut drive = entry.lock();
-    if entry.cancelled.load(Ordering::SeqCst) {
-        return StepResult::err(StbString::from_string("package tool cancelled".into()));
-    }
-    if drive.completed {
-        return StepResult::err(StbString::from_string(
-            "package tool polled after completion".into(),
-        ));
-    }
-    drive.completed = true;
-    match (drive.builder)(&drive.params) {
-        Ok(text) => StepResult::done(StbString::from_string(tool_result(&text))),
-        Err(message) => StepResult::err(StbString::from_string(message)),
-    }
-}
-
-pub fn cancel(handle: StepHandle) {
-    HANDLES.cancel(handle);
-}
-
-pub fn destroy(handle: StepHandle) {
-    drop(HANDLES.remove(handle));
-}
-
-fn tool_result(text: &str) -> String {
-    serde_json::json!({"content": [{"type": "text", "text": text}]}).to_string()
-}
+pub use rpi_plugin_sdk::callbacks::free_string as plugin_free_string;
 
 pub fn schema(name: &str, description: &str, parameters: &str) -> rpi_plugin_sdk::StableToolSchema {
     rpi_plugin_sdk::StableToolSchema {
@@ -80,8 +17,6 @@ pub fn schema(name: &str, description: &str, parameters: &str) -> rpi_plugin_sdk
         parameters: StbString::from_string(parameters.to_string()),
     }
 }
-
-pub use rpi_plugin_sdk::callbacks::free_string as plugin_free_string;
 
 pub fn string_param(params: &Value, name: &str) -> Result<String, String> {
     params
@@ -99,47 +34,102 @@ pub fn optional_string(params: &Value, name: &str, default: &str) -> String {
         .to_string()
 }
 
+/// Read an optional string param, treating blank/whitespace as absent so an empty
+/// value never becomes a bare CLI flag.
+pub fn optional_trimmed(params: &Value, name: &str) -> Option<String> {
+    params
+        .get(name)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// A result with only text content (no state to replay).
+pub fn content_only(text: &str) -> String {
+    serde_json::json!({"content":[{"type":"text","text":text}]}).to_string()
+}
+
+/// A result that also carries `details`, which the host persists on the tool
+/// result so the extension can reconstruct its state by replaying the branch.
+pub fn result_with_details(text: &str, details: Value) -> String {
+    serde_json::json!({"content":[{"type":"text","text":text}],"details":details}).to_string()
+}
+
+/// Generate a tool's `extern "C"` entry points over a private `ToolHandles`
+/// registry. The builder returns the **full** result JSON (content + details).
 #[macro_export]
-macro_rules! export_single_tool_plugin {
-    ($builder:path, $name:literal, $description:literal, $parameters:literal) => {
-        extern "C" fn package_execute(
-            _: rpi_plugin_sdk::StbStringRef,
-            params: rpi_plugin_sdk::StbString,
-            free: Option<rpi_plugin_sdk::FreeStringFn>,
-        ) -> rpi_plugin_sdk::StepHandle {
-            $crate::kit::execute(params, free, $builder)
-        }
-
-        extern "C" fn package_poll(
-            handle: rpi_plugin_sdk::StepHandle,
-            callback: Option<rpi_plugin_sdk::ToolPartialCb>,
-            user_data: *mut std::ffi::c_void,
-        ) -> rpi_plugin_sdk::StepResult {
-            $crate::kit::poll(handle, callback, user_data)
-        }
-
-        extern "C" fn package_cancel(handle: rpi_plugin_sdk::StepHandle) {
-            $crate::kit::cancel(handle)
-        }
-
-        extern "C" fn package_destroy(handle: rpi_plugin_sdk::StepHandle) {
-            $crate::kit::destroy(handle)
-        }
-        rpi_plugin_sdk::export_plugin!(|api| {
-            let Some(register) = api.register_tool else {
-                return 1;
+macro_rules! tool_entry {
+    ($module:ident, $builder:path) => {
+        mod $module {
+            use rpi_plugin_sdk::handles::ToolHandles;
+            use rpi_plugin_sdk::{
+                FreeStringFn, StbString, StbStringRef, StepHandle, StepResult, ToolPartialCb,
             };
-            let schema = Box::new($crate::kit::schema($name, $description, $parameters));
-            let rc = register(
-                &*schema,
-                package_execute,
-                package_poll,
-                package_cancel,
-                package_destroy,
-                $crate::kit::plugin_free_string,
-            );
-            drop(schema);
-            rc
-        });
+            use serde_json::Value;
+            use std::ffi::c_void;
+            use std::sync::atomic::Ordering;
+
+            pub struct Drive {
+                pub params: Value,
+                pub builder: fn(&Value) -> Result<String, String>,
+                pub completed: bool,
+            }
+
+            static HANDLES: ToolHandles<Drive> = ToolHandles::new();
+
+            pub extern "C" fn execute(
+                _: StbStringRef,
+                params: StbString,
+                free: Option<FreeStringFn>,
+            ) -> StepHandle {
+                let text = params.to_string_lossy();
+                params.free_with(free);
+                HANDLES.insert(Drive {
+                    params: serde_json::from_str(&text).unwrap_or(Value::Null),
+                    builder: $builder,
+                    completed: false,
+                })
+            }
+
+            pub extern "C" fn poll(
+                handle: StepHandle,
+                _: Option<ToolPartialCb>,
+                _: *mut c_void,
+            ) -> StepResult {
+                if handle.is_null() {
+                    return StepResult::err(StbString::from_string("null package handle".into()));
+                }
+                let Some(entry) = HANDLES.get(handle) else {
+                    return StepResult::err(StbString::from_string(
+                        "invalid or destroyed tool handle".into(),
+                    ));
+                };
+                let mut drive = entry.lock();
+                if entry.cancelled.load(Ordering::SeqCst) {
+                    return StepResult::err(StbString::from_string(
+                        "package tool cancelled".into(),
+                    ));
+                }
+                if drive.completed {
+                    return StepResult::err(StbString::from_string(
+                        "package tool polled after completion".into(),
+                    ));
+                }
+                drive.completed = true;
+                match (drive.builder)(&drive.params) {
+                    Ok(text) => StepResult::done(StbString::from_string(text)),
+                    Err(message) => StepResult::err(StbString::from_string(message)),
+                }
+            }
+
+            pub extern "C" fn cancel(handle: StepHandle) {
+                HANDLES.cancel(handle);
+            }
+
+            pub extern "C" fn destroy(handle: StepHandle) {
+                drop(HANDLES.remove(handle));
+            }
+        }
     };
 }

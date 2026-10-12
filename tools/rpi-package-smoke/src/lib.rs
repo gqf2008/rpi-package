@@ -41,6 +41,8 @@ mod tests {
             "webfetch",
             "im_message_server",
             "subagent",
+            "plan",
+            "dispatch",
         ]);
         assert_eq!(names, expected);
         assert_eq!(

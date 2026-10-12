@@ -17,9 +17,9 @@ use std::time::Duration;
 
 use wait_timeout::ChildExt;
 
-/// Tool this package registers. Excluded from the child's tool set so a
-/// subagent cannot recursively delegate (design §8 "递归守卫").
-pub const TOOL_NAME: &str = "subagent";
+/// Tools this package registers. Excluded from the child's tool set so a
+/// subagent cannot recursively orchestrate (design §8 "递归守卫").
+pub const EXCLUDED_TOOLS: &str = "subagent,plan,dispatch";
 
 /// Upper bound on the text fed back to the orchestrator (design §8 "输出截断").
 pub const MAX_OUTPUT_BYTES: usize = 40_000;
@@ -43,9 +43,9 @@ pub fn child_command(
     let mut command = Command::new(exe);
     command
         .arg("-p")
-        // Recursion guard: the child must not offer `subagent` again.
+        // Recursion guard: the child must not offer `subagent`/`plan`/`dispatch`.
         .arg("--exclude-tools")
-        .arg(TOOL_NAME);
+        .arg(EXCLUDED_TOOLS);
     if let Some(provider) = provider.filter(|value| !value.is_empty()) {
         command.arg("--provider").arg(provider);
     }
@@ -178,7 +178,7 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(args, vec!["-p", "--exclude-tools", "subagent"]);
+        assert_eq!(args, vec!["-p", "--exclude-tools", EXCLUDED_TOOLS]);
 
         let envs: Vec<(String, String)> = command
             .get_envs()
@@ -211,7 +211,7 @@ mod tests {
             vec![
                 "-p",
                 "--exclude-tools",
-                "subagent",
+                EXCLUDED_TOOLS,
                 "--provider",
                 "deepseek",
                 "--model",
@@ -225,7 +225,7 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(bare_args, vec!["-p", "--exclude-tools", "subagent"]);
+        assert_eq!(bare_args, vec!["-p", "--exclude-tools", EXCLUDED_TOOLS]);
     }
 
     #[test]

@@ -9,10 +9,13 @@ Design and staged plan: [`DESIGN.md`](DESIGN.md).
 
 ## Status
 
-**Stage 1 — single-node smoke (this crate).** Registers one tool:
+Three tools share one session-scoped task graph. The graph is carried in
+`details` on every `plan`/`dispatch` result and rebuilt by replaying the current
+session branch, so it survives `/tree` navigation and forks.
 
-- `subagent` — run one bounded task in a fresh `rpi -p` subprocess and return its
-  final answer.
+### `subagent` — one bounded delegation
+
+Run one task in a fresh `rpi -p` subprocess and return its final answer.
 
 ```json
 {"task":"review packages/rpi-lens for bugs","role":"reviewer","maxTurns":6,"timeoutSeconds":120}
@@ -27,16 +30,36 @@ Design and staged plan: [`DESIGN.md`](DESIGN.md).
 | `maxTurns` | no | 8 | 1–32 |
 | `timeoutSeconds` | no | 300 | 10–1800 |
 
+### `plan` — author/edit the DAG
+
+| action | params | effect |
+| --- | --- | --- |
+| `set` | `nodes` | replace the graph (validates ids, deps, acyclicity) |
+| `update` | `addNodes` / `removeIds` / `setDeps` / `status` / `reset` | edit the graph in place |
+| `show` | — | render the graph |
+
+A node is `{id, task, deps[], role?, provider?, model?, maxTurns?, timeoutSeconds?}`.
+
+### `dispatch` — run one wave
+
+Runs every pending node whose dependencies are all `done`, up to `maxParallel`
+children at once (default 4, cap 16), then reports each node's result summary and
+the updated graph. One call advances **one wave**, so the orchestrator sees the
+results and can reshape the graph before the next call.
+
+Guards (all enforced in code, not asked of the model):
+
+- a cycle is rejected by `plan` before anything runs;
+- a wave with nothing ready and pending nodes left reports "no progress" instead
+  of spinning;
+- a failed node makes its dependents `skipped` transitively.
+
 ### Provider / model passthrough
 
 The child shares the orchestrator's agent dir, so with no `provider`/`model` it
 uses that dir's **default** provider. If the orchestrator was started with an
 explicit `--provider`/`--model`, pass the same values here so the child does not
 silently use a different (or misconfigured) default.
-
-**Stage 2 — DAG orchestration.** Adds `plan` (author/edit a task graph) and
-`dispatch` (run the ready set, one wave per call so the model can reshape the
-graph from the results). Not implemented yet.
 
 ## How it stays bounded
 
@@ -54,6 +77,11 @@ The task is written to the child's **stdin** rather than passed positionally:
 `rpi -p` treats the next non-flag token as its prompt, so a task beginning with
 `-` would otherwise be parsed as a CLI flag. Piped stdin becomes the initial
 prompt (`rpi-cli::app::build_initial_message`).
+
+## Recursion guard
+
+The child is launched with `--exclude-tools subagent,plan,dispatch`, so a
+subagent cannot orchestrate again.
 
 ## Build
 
