@@ -125,12 +125,12 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 - [x] AC4：含环的图被拒 —— e2e：工具返回 `cycle detected among: a, b`。
 - [x] AC5：超 `timeoutSeconds` 被 kill 标 `failed` —— e2e：节点 `timeoutSeconds=10` 跑 `sleep 60` → 13s 内标 `failed`。
 - [x] AC6：`RPI_MAX_TURNS_PER_RUN` 生效 —— e2e：`maxTurns=2` 的子代理做不完多步任务，`expectFile` 未产出 → `failed`（也即治好了“截断仍算成功”的假成功）。
-- [ ] AC7：编排层 `deadlineMs` 到期 auto-pause —— **搁置**（不在本扩展，推给 `rpi-goal`）。
+- [x] AC7：编排层轮数/时长预算 auto-pause —— **由 `rpi-goal` 覆盖**（已本地安装并实测：`goal start maxTurns=1` → 跑完 1 轮后 `goal show` 显示 `turns 1/1` + `paused`）。硬轮数天花板另有宿主的 `RPI_MAX_TURNS_PER_RUN`。
 - [x] AC8：取消 → 在跑子进程全被 kill、无孤儿 —— e2e（`rpi --mode rpc` 发 `abort`）：子 rpi 与孙 `sleep` 均被杀。
 - [x] AC9（**砍掉**）：不做分支重放——会话切换即清空图，恢复还是重来由人决定（设计决定，非缺陷）。
 - [x] AC10：子进程默认无编排工具（无递归）—— e2e：子代理尝试调 `plan` → 回报 `PLAN_ABSENT`。
 
-**结果：范围内 8/8 通过**（AC1–AC6、AC8、AC10）；AC7 搁置、AC9 砍掉。
+**结果：范围内 8/8 通过**（AC1–AC6、AC8、AC10）；AC7 由 `rpi-goal` 覆盖（已装并实测）；AC9 砍掉。
 
 ## 11. 参考实现锚点
 
