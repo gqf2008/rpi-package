@@ -361,21 +361,24 @@ pub(crate) fn resources(params: &Value, control: &Control) -> Result<Value, Stri
         return Ok(json!({"server": name, "uri": uri, "unsubscribed": true}));
     }
     if action == "subscribe" {
+        if matches!(&config, McpServerConfig::Http(_)) {
+            return Err(
+                "mcp_resource subscribe is not supported for HTTP servers yet (no push channel)"
+                    .into(),
+            );
+        }
         with_session(key.clone(), config, timeout, control, |session, control| {
             response_result(session.request("resources/subscribe", json!({"uri": uri}), control)?)
         })?;
         add_subscription(&key, &uri);
         return Ok(json!({"server": name, "uri": uri, "subscribed": true}));
     }
-    // read
+    // read — flatten and bound the contents: a large blob must not reach the
+    // model through the tool result.
     with_session(key, config, timeout, control, |session, control| {
         let result =
             response_result(session.request("resources/read", json!({"uri": uri}), control)?)?;
-        Ok(json!({
-            "server": name,
-            "uri": uri,
-            "contents": result.get("contents").cloned().unwrap_or(Value::Null),
-        }))
+        Ok(json!({"server": name, "uri": uri, "text": resource_text(&result)}))
     })
 }
 
