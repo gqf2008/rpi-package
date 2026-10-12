@@ -57,6 +57,27 @@ fn flush_pending_inject() {
     }
 }
 
+/// Environment markers meaning "this process is a subagent spawned by an
+/// orchestrator". Such a process shares the parent's project directory — and
+/// therefore its `.rpi/goals.json` — so its turns must not be counted against
+/// the parent's goal budget.
+///
+/// `RPI_ORCHESTRATOR_SUBAGENT` is rpi-orchestrator's marker; the `LANGFUSE_*` one
+/// is the SDK's cross-repo "I am a subagent" contract
+/// ([`rpi_plugin_sdk::SUBAGENT_PARENT_TRACE_ID_ENV`]).
+const ORCHESTRATOR_SUBAGENT_ENV: &str = "RPI_ORCHESTRATOR_SUBAGENT";
+
+fn is_subagent_from(orchestrator_marker: bool, langfuse_parent: bool) -> bool {
+    orchestrator_marker || langfuse_parent
+}
+
+fn is_subagent() -> bool {
+    is_subagent_from(
+        std::env::var_os(ORCHESTRATOR_SUBAGENT_ENV).is_some(),
+        std::env::var_os(rpi_plugin_sdk::SUBAGENT_PARENT_TRACE_ID_ENV).is_some(),
+    )
+}
+
 /// Call a host runtime action (e.g. `AppendEntry`). Safe from any thread,
 /// including event handlers and command handlers.
 fn call_runtime(id: RuntimeActionId, args: Value) -> Result<Value, String> {
@@ -782,6 +803,12 @@ use rpi_plugin_sdk::callbacks::free_string;
 extern "C" fn on_turn_end(event: StablePluginEvent, _: *mut c_void) -> i32 {
     // TurnEnd carries no payload (empty event) in this ABI; ignore the struct.
     let _ = event;
+    // A subagent process shares the parent's cwd and therefore its
+    // `.rpi/goals.json`; counting its turns would inflate `turnsUsed` and could
+    // pause the orchestrator early. Skip accounting and injection entirely.
+    if is_subagent() {
+        return 0;
+    }
     // Safe boundary: flush any notice queued during this turn's tool batch.
     flush_pending_inject();
     let mut goals = read_goals();
@@ -1151,5 +1178,12 @@ mod tests {
         let updated = apply_limits(&base, 1_000, None, None);
         assert_eq!(updated.max_turns, Some(10));
         assert_eq!(updated.deadline_ms, Some(5_000));
+    }
+
+    #[test]
+    fn subagent_markers_skip_turn_accounting() {
+        assert!(is_subagent_from(true, false));
+        assert!(is_subagent_from(false, true));
+        assert!(!is_subagent_from(false, false));
     }
 }
