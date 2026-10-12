@@ -895,6 +895,18 @@ fn split_title_notes(rest: &str) -> (String, Option<String>) {
     (title_parts.join(" "), notes)
 }
 
+/// Shown after `/goal start`: recording a goal does not run the agent, so the
+/// user still has to send a message to begin.
+const START_NEXT_STEP_HINT: &str =
+    "ℹ️ Goal recorded — send your next message to start working on it.";
+
+fn started_confirmation(title: &str, budget_summary: Option<&str>) -> String {
+    match budget_summary {
+        Some(budget) => format!("🎯 Goal started: {title}\n{budget}\n{START_NEXT_STEP_HINT}"),
+        None => format!("🎯 Goal started: {title}\n{START_NEXT_STEP_HINT}"),
+    }
+}
+
 const COMMAND_HELP: &str = "\
 /goal                     show status
 /goal start <title>       start a goal (--notes \"...\" optional)
@@ -924,13 +936,8 @@ fn run_command(args: &str) -> String {
         "help" => Ok(COMMAND_HELP.to_string()),
         "start" => {
             let (title, notes) = split_title_notes(rest);
-            op_start(&title, notes.as_deref().unwrap_or(""), None, None).map(|goal| {
-                format!(
-                    "🎯 Goal started: {}\n{}",
-                    goal.title,
-                    goal.budget_summary(now_ms())
-                )
-            })
+            op_start(&title, notes.as_deref().unwrap_or(""), None, None)
+                .map(|goal| started_confirmation(&goal.title, Some(&goal.budget_summary(now_ms()))))
         }
         "pause" => op_set_status("paused").map(|goal| format!("⏸️ Paused: {}", goal.title)),
         "resume" => op_set_status("active").map(|goal| format!("▶️ Resumed: {}", goal.title)),
@@ -983,7 +990,7 @@ fn run_command(args: &str) -> String {
         _ => {
             let (title, notes) = split_title_notes(args);
             op_start(&title, notes.as_deref().unwrap_or(""), None, None)
-                .map(|goal| format!("🎯 Goal started: {}", goal.title))
+                .map(|goal| started_confirmation(&goal.title, None))
         }
     };
 
@@ -1185,5 +1192,14 @@ mod tests {
         assert!(is_subagent_from(true, false));
         assert!(is_subagent_from(false, true));
         assert!(!is_subagent_from(false, false));
+    }
+
+    #[test]
+    fn start_confirmation_tells_the_user_to_send_a_message() {
+        let text = started_confirmation("Ship it", Some("turns 0/20"));
+        assert!(text.contains("Ship it"));
+        assert!(text.contains("turns 0/20"));
+        assert!(text.contains(START_NEXT_STEP_HINT));
+        assert!(started_confirmation("Ship it", None).contains(START_NEXT_STEP_HINT));
     }
 }
