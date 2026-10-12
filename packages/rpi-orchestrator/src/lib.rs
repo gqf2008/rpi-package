@@ -24,9 +24,41 @@ mod spawn;
 mod subagent;
 
 use serde_json::Value;
-use std::sync::{Mutex, OnceLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::control::Control;
 
 static GRAPH: OnceLock<Mutex<graph::Graph>> = OnceLock::new();
+static RUNNING: OnceLock<Mutex<HashMap<String, Control>>> = OnceLock::new();
+static REPORTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Set when the host cancels a tool call (a run abort). Node workers link to this
+/// so an abort kills in-flight children, while a *normal* tool-call completion
+/// (`destroy`, which also cancels the call's own token) does not.
+static HOST_ABORT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+pub(crate) fn host_abort_flag() -> Arc<AtomicBool> {
+    Arc::clone(HOST_ABORT.get_or_init(|| Arc::new(AtomicBool::new(false))))
+}
+
+/// A node token linked to the host-abort signal (and independently cancellable).
+pub(crate) fn node_control() -> Control {
+    Control::child_of(&Control::from_flag(host_abort_flag()))
+}
+
+/// Node id → its cancellation token, for every node currently running. Lets a
+/// mid-wave `plan cancel` stop one node without stopping the whole call.
+pub(crate) fn running() -> &'static Mutex<HashMap<String, Control>> {
+    RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Node ids whose terminal result has already been returned to the model, so
+/// repeated `dispatch` calls report each result exactly once.
+pub(crate) fn reported() -> &'static Mutex<HashSet<String>> {
+    REPORTED.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 /// The one in-memory graph. A poisoned lock is recovered rather than panicking,
 /// mirroring the SDK's tool-handle convention.
@@ -40,9 +72,9 @@ crate::tool_entry!(dispatch_tool, crate::dispatch::dispatch);
 
 const SUBAGENT_PARAMS: &str = r#"{"type":"object","properties":{"task":{"type":"string","maxLength":20000},"role":{"type":"string"},"provider":{"type":"string"},"model":{"type":"string"},"maxTurns":{"type":"integer","minimum":1,"maximum":32},"timeoutSeconds":{"type":"integer","minimum":10,"maximum":1800}},"required":["task"]}"#;
 
-const PLAN_PARAMS: &str = r#"{"type":"object","properties":{"action":{"type":"string","enum":["set","update","show"]},"nodes":{"type":"array","description":"action=set: full node list. Each node: {id, task, deps?, role?, provider?, model?, maxTurns?, timeoutSeconds?, expectFile?, verify?}"},"addNodes":{"type":"array","description":"action=update: nodes to add (same node shape)"},"removeIds":{"type":"array","items":{"type":"string"},"description":"action=update: ids to remove"},"setDeps":{"type":"array","description":"action=update: [{id, deps}]"},"reset":{"type":"array","items":{"type":"string"},"description":"action=update: re-arm these ids to pending for another attempt"}},"required":["action"]}"#;
+const PLAN_PARAMS: &str = r#"{"type":"object","properties":{"action":{"type":"string","enum":["set","update","show"]},"nodes":{"type":"array","description":"action=set: full node list. Each node: {id, task, deps?, role?, provider?, model?, maxTurns?, timeoutSeconds?, expectFile?, verify?}"},"addNodes":{"type":"array","description":"action=update: nodes to add (same node shape)"},"removeIds":{"type":"array","items":{"type":"string"},"description":"action=update: ids to remove (a running node is cancelled first)"},"cancel":{"type":"array","items":{"type":"string"},"description":"action=update: stop these nodes — a running child is killed and the node fails, a pending node is skipped"},"setDeps":{"type":"array","description":"action=update: [{id, deps}]"},"reset":{"type":"array","items":{"type":"string"},"description":"action=update: re-arm these ids to pending for another attempt (not allowed while a node is running)"}},"required":["action"]}"#;
 
-const DISPATCH_PARAMS: &str = r#"{"type":"object","properties":{"maxParallel":{"type":"integer","minimum":1,"maximum":16,"description":"max concurrent subagents for this wave (default 4)"}}}"#;
+const DISPATCH_PARAMS: &str = r#"{"type":"object","properties":{"maxParallel":{"type":"integer","minimum":1,"maximum":16,"description":"max concurrent subagents (default 4), counted across everything currently running"},"waitSeconds":{"type":"integer","minimum":0,"description":"0 = start ready nodes and return at once (reshape the graph meanwhile); N = wait up to N seconds for running nodes; omit to wait until the running set drains"}}}"#;
 
 /// Optional override for the orchestration guidance injected into the system
 /// prompt. Guidance is **on by default whenever a goal is active** — `/goal`
@@ -191,7 +223,7 @@ rpi_plugin_sdk::export_plugin!(|api| {
     {
         let schema = Box::new(crate::kit::schema(
             "plan",
-            "Author or edit the task DAG. action=set (replace with `nodes`), action=update (addNodes/removeIds/setDeps/reset), action=show. A node may declare `expectFile` (file that must exist after its child runs) and `verify` (shell command that must exit 0); `dispatch` enforces both. Completion is written only by `dispatch`, never by `plan`.",
+            "Author or edit the task DAG. action=set (replace with `nodes`), action=update (addNodes/removeIds/cancel/setDeps/reset), action=show. A node may declare `expectFile` (file that must exist after its child runs) and `verify` (shell command that must exit 0); `dispatch` enforces both. Completion is written only by `dispatch`, never by `plan`.",
             PLAN_PARAMS,
         ));
         let rc = register(
@@ -211,7 +243,7 @@ rpi_plugin_sdk::export_plugin!(|api| {
     {
         let schema = Box::new(crate::kit::schema(
             "dispatch",
-            "Run one wave of the plan: every pending node whose dependencies are done, up to `maxParallel` subagents at once. Returns each node's result summary and the updated graph.",
+            "Schedule the plan: start every ready node within `maxParallel`, then (per `waitSeconds`) wait and return the results of nodes that finished. Nodes run in the background, so with `waitSeconds=0` you can reshape the graph (`plan` cancel/addNodes) while a wave is in flight and call dispatch again to collect.",
             DISPATCH_PARAMS,
         ));
         let rc = register(

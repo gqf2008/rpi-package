@@ -93,7 +93,7 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 
 - **阶段一（已实现）**：`plan` + `dispatch`（一波一同步）+ 环/无进展/递归守卫 + 子代理级预算（`RPI_MAX_TURNS_PER_RUN` + 宿主超时 kill）。已跑通“拆图 → 并行一波 → 结果回流 → 改图 → 下一波”。
   - **编排层自身预算（轮数/deadline）未在本扩展实现**：由 `rpi-goal` 的 `maxTurns`/`deadlineMs` 承担（同进程内可叠加使用）。
-- **阶段二（未做，可选）**：动态图——`dispatch` 返回进行中句柄，后续轮询并随时改图（`StepResult::pending` 已支持进度流式）。
+- **阶段二（已实现）**：动态图——`dispatch` 不再强制“一次跑完一波”。**默认行为不变**（`waitSeconds` 省略 = 等运行集跑完）；但 `waitSeconds=0` **立即返回**，节点在**后台**跑，期间可用 `plan update` 的 `addNodes`/`removeIds`/`setDeps`/`cancel` **中途改图/取消在跑节点**，再 `dispatch` 启动新就绪节点并收集已完成节点（每个结果只报一次）。节点可被自身 `cancel` 或宿主 abort 取消（两路经链接的取消 token）。
 
 ## 8. 守卫清单（必须，否则一定出事）
 

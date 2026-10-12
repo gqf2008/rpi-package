@@ -45,28 +45,39 @@ A node is `{id, task, deps[], role?, provider?, model?, maxTurns?, timeoutSecond
 **Completion is written only by `dispatch`** — there is no way to hand-mark a node
 `done`, so a plan cannot be "completed" by the model. `reset` re-arms a node.
 
-### `dispatch` — run one wave
+### `dispatch` — schedule the DAG
 
-Runs every pending node whose dependencies are all `done`, up to `maxParallel`
-children at once (default 4, cap 16), then reports each node's result summary and
-the updated graph. One call advances **one wave**, so the orchestrator sees the
-results and can reshape the graph before the next call.
+Starts every pending node whose dependencies are all `done`, up to `maxParallel`
+children at once (default 4, cap 16). `waitSeconds` decides how long the call
+blocks:
+
+| `waitSeconds` | behaviour |
+| --- | --- |
+| omitted | wait until the running set drains (one call per wave) |
+| `0` | start and return immediately — the graph can be reshaped meanwhile |
+| `N` | start, then wait up to `N` seconds |
+
+The call reports the nodes it started, the nodes still running, and the result of
+every node that reached a terminal state since the previous call (each result is
+reported exactly once). With `waitSeconds=0` the orchestrator can, while a wave is
+in flight, `plan` `addNodes` / `setDeps` / `cancel` and then call `dispatch`
+again to start newly-ready nodes and collect finished ones.
 
 Guards (all enforced in code, not asked of the model):
 
 - a cycle is rejected by `plan` before anything runs;
-- a wave with nothing ready and pending nodes left reports "no progress" instead
-  of spinning;
+- nothing ready *and* nothing running *and* pending nodes left reports "no
+  progress" instead of spinning;
 - a failed node makes its dependents `skipped` transitively;
 - **per-node acceptance**: after a child exits successfully, a node that declared
   `expectFile` must have produced it, and one that declared `verify` must pass
   its shell command — otherwise the node is `failed`. Without this a child that
   hit its turn cap still exits 0 and would be recorded as `done`;
 - **non-blocking and cancellable**: each tool's builder runs on a worker thread,
-  so `poll` never blocks. Progress streams as a pending partial (per wave for
-  `dispatch`), and cancelling the run kills the in-flight child **and its
-  descendants** within ~100 ms — the tree is walked because nested shells
-  (rpi's own `bash` tool) put themselves in a new process group;
+  so `poll` never blocks. `plan update cancel` stops one running child; cancelling
+  the whole run kills in-flight children **and their descendants** within ~100 ms
+  — the tree is walked because nested shells (rpi's own `bash` tool) put
+  themselves in a new process group;
 - **no session litter**: children run with `--no-session`, so a wave does not
   leave a ~2 MB session file per node in the parent's `.rpi/sessions/` directory.
 

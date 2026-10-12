@@ -32,6 +32,11 @@ impl Status {
             Status::Skipped => "skipped",
         }
     }
+
+    /// `done`/`failed`/`skipped` — no further work is expected for the node.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Status::Done | Status::Failed | Status::Skipped)
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -194,6 +194,11 @@ macro_rules! tool_entry {
             }
 
             pub extern "C" fn cancel(handle: StepHandle) {
+                // The host cancels a tool handle to abort a run; normal completion
+                // goes through `destroy` instead. Record the abort so background
+                // node workers (which outlive this call) stop, without `destroy`
+                // stopping them on success.
+                $crate::host_abort_flag().store(true, std::sync::atomic::Ordering::SeqCst);
                 if let Some(entry) = HANDLES.get(handle) {
                     entry.cancel();
                     entry.lock().control.cancel();

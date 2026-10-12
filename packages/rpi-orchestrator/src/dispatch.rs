@@ -1,21 +1,39 @@
-//! The `dispatch` tool: run one wave of the DAG.
+//! The `dispatch` tool: schedule the DAG.
 //!
-//! Scheduling is deterministic code, not a model decision: the ready set is
-//! "pending nodes whose dependencies are all done", and it is executed with at
-//! most `maxParallel` concurrent child processes. One call advances **one wave**,
-//! so the orchestrator sees the results and can reshape the graph before the
-//! next call.
+//! Scheduling is deterministic code: the ready set is "pending nodes whose
+//! dependencies are all done", started within a global concurrency budget. Nodes
+//! run on **detached** workers, so a call can return before they finish — the
+//! orchestrator can reshape the graph (`plan` `addNodes` / `cancel`) while a wave
+//! is in flight, then call `dispatch` again to start newly-ready nodes and
+//! collect finished ones.
+//!
+//! `waitSeconds` bounds how long a call blocks:
+//! - absent  → wait until the running set drains (one call per wave, classic);
+//! - `0`     → start and return immediately (the dynamic schedule);
+//! - `N`     → start, then wait up to N seconds.
+
+use std::time::{Duration, Instant};
 
 use crate::control::Control;
-use crate::graph::{Graph, Status};
-use crate::graph_state;
+use crate::graph::{Graph, Node, Status};
 use crate::kit::{progress, result_with_details, Progress};
 use crate::spawn;
+use crate::{graph_state, reported, running};
 use serde_json::Value;
 
 const DEFAULT_MAX_PARALLEL: usize = 4;
 const MAX_PARALLEL_CAP: usize = 16;
 const RESULT_SUMMARY_BYTES: usize = 2_000;
+const WAIT_POLL: Duration = Duration::from_millis(100);
+
+enum Wait {
+    /// Return as soon as the ready set is started.
+    None,
+    /// Block up to this long.
+    Fixed(Duration),
+    /// Block until the running set drains.
+    Drain,
+}
 
 pub fn dispatch(
     params: &Value,
@@ -28,127 +46,168 @@ pub fn dispatch(
         .and_then(Value::as_u64)
         .unwrap_or(DEFAULT_MAX_PARALLEL as u64)
         .clamp(1, MAX_PARALLEL_CAP as u64) as usize;
+    let wait = match params.get("waitSeconds").and_then(Value::as_u64) {
+        Some(0) => Wait::None,
+        Some(secs) => Wait::Fixed(Duration::from_secs(secs)),
+        None => Wait::Drain,
+    };
 
-    let mut guard = graph_state().lock().unwrap_or_else(|p| p.into_inner());
-    if guard.nodes.is_empty() {
-        return Err("no plan yet: call plan(action=set, nodes=[...]) first".into());
-    }
+    // ---- Start the ready set within the global concurrency budget. ----
+    let started = {
+        let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
+        if graph.nodes.is_empty() {
+            return Err("no plan yet: call plan(action=set, nodes=[...]) first".into());
+        }
+        let running_now = running().lock().unwrap_or_else(|p| p.into_inner()).len();
+        let budget = max_parallel.saturating_sub(running_now);
 
-    let ready = guard.ready();
-    if ready.is_empty() {
-        if guard.has_pending() {
-            let blocked = guard.pending_ids().join(", ");
+        let mut ready = graph.ready();
+        if ready.is_empty() && running_now == 0 && graph.has_pending() {
+            let blocked = graph.pending_ids().join(", ");
             return Err(format!(
                 "no progress: no pending node is ready (blocked by unmet dependencies): {blocked}"
             ));
         }
-        return Ok(result_with_details(
-            &format!("nothing left to dispatch\n\n{}", guard.render()),
-            guard.to_details(),
+        ready.truncate(budget);
+
+        let mut started = Vec::with_capacity(ready.len());
+        for id in ready {
+            let Some(node) = graph.get(&id).cloned() else {
+                continue;
+            };
+            if let Some(slot) = graph.get_mut(&id) {
+                slot.status = Status::Running;
+            }
+            let node_control = crate::node_control();
+            running()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(id.clone(), node_control.clone());
+            spawn_node_worker(id.clone(), node, node_control, progress_tx.clone());
+            started.push(id);
+        }
+        started
+    };
+
+    // ---- Wait, if asked. ----
+    match wait {
+        Wait::None => {}
+        Wait::Fixed(max) => wait_for_drain(Some(max)),
+        Wait::Drain => wait_for_drain(None),
+    }
+
+    // ---- Collect. ----
+    let graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
+    let finished = take_finished(&graph);
+    let running_ids: Vec<String> = {
+        let mut ids: Vec<String> = running()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .keys()
+            .cloned()
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    let mut text = format!(
+        "started {} · running {} · finished now {}\n",
+        started.len(),
+        running_ids.len(),
+        finished.len()
+    );
+    if !started.is_empty() {
+        text.push_str(&format!("started: {}\n", started.join(", ")));
+    }
+    if !running_ids.is_empty() {
+        text.push_str(&format!("running: {}\n", running_ids.join(", ")));
+    }
+    for node in &finished {
+        text.push_str(&format!(
+            "\n--- {} ({})\n{}\n",
+            node.id,
+            node.status.as_str(),
+            node.result.as_deref().unwrap_or("(no output)")
         ));
     }
-
-    for id in &ready {
-        if let Some(node) = guard.get_mut(id) {
-            node.status = Status::Running;
-        }
-    }
-
-    // Snapshot before releasing the lock into the wave: the children run for a
-    // long time and must not hold the state lock.
-    let snapshot = guard.clone();
-    let outcomes = run_wave(&snapshot, &ready, max_parallel, control, progress_tx);
-
-    for (id, outcome) in outcomes {
-        // Acceptance is checked only when the child reported success: a child that
-        // hit its turn cap still exits 0, so without this a no-op would be `done`.
-        let spec = snapshot.get(&id);
-        let verified = match &outcome {
-            Ok(_) => verify_node(
-                spec.and_then(|node| node.expect_file.as_deref()),
-                spec.and_then(|node| node.verify.as_deref()),
-            ),
-            Err(_) => Ok(()),
-        };
-        if let Some(node) = guard.get_mut(&id) {
-            match (outcome, verified) {
-                (Ok(text), Ok(())) => {
-                    node.status = Status::Done;
-                    node.result = Some(summarize(&text));
-                }
-                (Ok(text), Err(reason)) => {
-                    node.status = Status::Failed;
-                    node.result = Some(summarize(&format!("{reason}\n---\n{text}")));
-                }
-                (Err(error), _) => {
-                    node.status = Status::Failed;
-                    node.result = Some(summarize(&error));
-                }
-            }
-        }
-    }
-    guard.propagate_skips();
-
-    let text = format!("dispatched {} node(s)\n\n{}", ready.len(), guard.render());
-    Ok(result_with_details(&text, guard.to_details()))
+    text.push('\n');
+    text.push_str(&graph.render());
+    Ok(result_with_details(&text, graph.to_details()))
 }
 
-/// Run `ids` with at most `max_parallel` children at a time, preserving input
-/// order in the returned pairs.
-fn run_wave(
-    graph: &Graph,
-    ids: &[String],
-    max_parallel: usize,
-    control: &Control,
-    progress_tx: &Progress,
-) -> Vec<(String, Result<String, String>)> {
-    let mut out = Vec::with_capacity(ids.len());
-    for chunk in ids.chunks(max_parallel.max(1)) {
-        progress(
-            progress_tx,
-            &format!(
-                "[dispatch] running {} node(s): {}",
-                chunk.len(),
-                chunk.join(", ")
-            ),
+/// Spawn a detached worker for one node. It runs the child, applies acceptance,
+/// commits the node's terminal state, and unregisters itself.
+fn spawn_node_worker(id: String, node: Node, control: Control, progress_tx: Progress) {
+    std::thread::spawn(move || {
+        progress(&progress_tx, &format!("[dispatch] {id} running"));
+        let outcome = spawn::run(
+            &node.task,
+            node.max_turns,
+            node.timeout_secs,
+            node.provider.as_deref(),
+            node.model.as_deref(),
+            &control,
         );
-        let chunk_results = std::thread::scope(|scope| {
-            let handles: Vec<(String, _)> = chunk
-                .iter()
-                .map(|id| {
-                    let node = graph.get(id).cloned().expect("ready node exists");
-                    let id = id.clone();
-                    let control = control.clone();
-                    let handle = scope.spawn(move || {
-                        spawn::run(
-                            &node.task,
-                            node.max_turns,
-                            node.timeout_secs,
-                            node.provider.as_deref(),
-                            node.model.as_deref(),
-                            &control,
-                        )
-                    });
-                    (id, handle)
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|(id, handle)| {
-                    let outcome = handle
-                        .join()
-                        .unwrap_or_else(|_| Err("subagent thread panicked".into()));
-                    (id, outcome)
-                })
-                .collect::<Vec<_>>()
-        });
-        out.extend(chunk_results);
-        // A cancelled wave must not start the next chunk.
-        if control.is_cancelled() {
-            break;
+        // Acceptance is only checked when the child reported success: a child that
+        // hit its turn cap still exits 0, so without this a no-op would be `done`.
+        let verified = match &outcome {
+            Ok(_) => verify_node(node.expect_file.as_deref(), node.verify.as_deref()),
+            Err(_) => Ok(()),
+        };
+        {
+            let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(slot) = graph.get_mut(&id) {
+                match (outcome, verified) {
+                    (Ok(text), Ok(())) => {
+                        slot.status = Status::Done;
+                        slot.result = Some(summarize(&text));
+                    }
+                    (Ok(text), Err(reason)) => {
+                        slot.status = Status::Failed;
+                        slot.result = Some(summarize(&format!("{reason}\n---\n{text}")));
+                    }
+                    (Err(error), _) => {
+                        slot.status = Status::Failed;
+                        slot.result = Some(summarize(&error));
+                    }
+                }
+            }
+            graph.propagate_skips();
         }
+        running()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
+        progress(&progress_tx, &format!("[dispatch] {id} finished"));
+    });
+}
+
+fn wait_for_drain(max: Option<Duration>) {
+    let start = Instant::now();
+    loop {
+        if running()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_empty()
+        {
+            return;
+        }
+        if max.is_some_and(|max| start.elapsed() >= max) {
+            return;
+        }
+        std::thread::sleep(WAIT_POLL);
     }
-    out
+}
+
+/// Terminal nodes whose result has not been returned yet, marking them reported.
+fn take_finished(graph: &Graph) -> Vec<Node> {
+    let mut reported = reported().lock().unwrap_or_else(|p| p.into_inner());
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.status.is_terminal() && reported.insert(node.id.clone()))
+        .cloned()
+        .collect()
 }
 
 /// Check a node's declared acceptance criteria after its child exits.
@@ -228,5 +287,13 @@ mod tests {
     fn verify_node_runs_declared_commands() {
         assert!(verify_node(None, Some("true")).is_ok());
         assert!(verify_node(None, Some("false")).is_err());
+    }
+
+    #[test]
+    fn wait_returns_immediately_when_nothing_runs() {
+        // Must not block when the running set is empty.
+        let start = Instant::now();
+        wait_for_drain(None);
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 }

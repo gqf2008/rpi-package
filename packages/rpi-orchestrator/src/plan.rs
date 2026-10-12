@@ -1,12 +1,12 @@
 //! The `plan` tool: author and edit the task DAG.
 //!
-//! Scheduling lives in `dispatch`; this tool only changes the graph's *shape*
-//! (and can re-arm node state). Every result carries the graph in `details` so
-//! it can be replayed from the session branch.
+//! Scheduling lives in `dispatch`; this tool changes the graph's *shape*
+//! (`addNodes` / `removeIds` / `setDeps`), re-arms nodes (`reset`) and can stop
+//! running ones (`cancel`). Every result carries the graph in `details`.
 //!
 //! There is deliberately **no** way for the model to mark a node `done`/`failed`:
-//! completion is only ever written by `dispatch`, so the plan cannot be
-//! "completed" by hand. `reset` is the one state edit the model keeps.
+//! terminal state is only ever written by `dispatch`, so the plan cannot be
+//! "completed" by hand.
 
 use crate::control::Control;
 use crate::graph::{Graph, Node, Status};
@@ -63,7 +63,19 @@ fn apply_update(graph: &mut Graph, params: &Value) -> Result<(), String> {
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
                 .ok_or("`removeIds` must contain non-empty strings")?;
+            cancel_node(graph, id);
             graph.nodes.retain(|node| node.id != id);
+        }
+    }
+    if let Some(cancel) = params.get("cancel") {
+        let array = cancel.as_array().ok_or("`cancel` must be an array")?;
+        for item in array {
+            let id = item
+                .as_str()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or("`cancel` must contain non-empty strings")?;
+            cancel_node(graph, id);
         }
     }
     if let Some(set_deps) = params.get("setDeps") {
@@ -104,11 +116,36 @@ fn apply_update(graph: &mut Graph, params: &Value) -> Result<(), String> {
             let node = graph
                 .get_mut(id)
                 .ok_or_else(|| format!("node `{id}` not found"))?;
+            if node.status == Status::Running {
+                return Err(format!(
+                    "node `{id}` is running; cancel it before resetting"
+                ));
+            }
             node.status = Status::Pending;
             node.result = None;
         }
     }
     Ok(())
+}
+
+/// Stop a node. A running node is signalled — its worker commits `failed`; a
+/// pending node is marked `skipped` so it never starts. Terminal nodes are left
+/// alone.
+fn cancel_node(graph: &mut Graph, id: &str) {
+    let control = crate::running()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(id)
+        .cloned();
+    if let Some(control) = control {
+        control.cancel();
+        return;
+    }
+    if let Some(node) = graph.get_mut(id) {
+        if node.status == Status::Pending {
+            node.status = Status::Skipped;
+        }
+    }
 }
 
 #[cfg(test)]
