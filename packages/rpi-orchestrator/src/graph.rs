@@ -255,7 +255,7 @@ impl Graph {
             visited += 1;
             let id = self.nodes[index].id.clone();
             for (other, node) in self.nodes.iter().enumerate() {
-                if node.deps.iter().any(|dep| *dep == id) {
+                if node.deps.contains(&id) {
                     indegree[other] -= 1;
                     if indegree[other] == 0 {
                         queue.push(other);
