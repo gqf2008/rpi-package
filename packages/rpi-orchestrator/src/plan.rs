@@ -1,8 +1,12 @@
 //! The `plan` tool: author and edit the task DAG.
 //!
 //! Scheduling lives in `dispatch`; this tool only changes the graph's *shape*
-//! (and can re-arm or clear node state). Every result carries the graph in
-//! `details` so it can be replayed from the session branch.
+//! (and can re-arm node state). Every result carries the graph in `details` so
+//! it can be replayed from the session branch.
+//!
+//! There is deliberately **no** way for the model to mark a node `done`/`failed`:
+//! completion is only ever written by `dispatch`, so the plan cannot be
+//! "completed" by hand. `reset` is the one state edit the model keeps.
 
 use crate::graph::{Graph, Node, Status};
 use crate::graph_state;
@@ -87,25 +91,6 @@ fn apply_update(graph: &mut Graph, params: &Value) -> Result<(), String> {
             node.deps = parsed;
         }
     }
-    if let Some(status) = params.get("status") {
-        let array = status.as_array().ok_or("`status` must be an array")?;
-        for item in array {
-            let id = item
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or("each `status` entry needs an `id`")?;
-            let value = item
-                .get("status")
-                .and_then(Value::as_str)
-                .ok_or("each `status` entry needs a `status`")?;
-            let parsed = Status::parse(value).ok_or_else(|| format!("unknown status `{value}`"))?;
-            let node = graph
-                .get_mut(id)
-                .ok_or_else(|| format!("node `{id}` not found"))?;
-            node.status = parsed;
-            node.result = None;
-        }
-    }
     if let Some(reset) = params.get("reset") {
         let array = reset.as_array().ok_or("`reset` must be an array")?;
         for item in array {
@@ -150,17 +135,20 @@ mod tests {
         apply_update(&mut g, &json!({"setDeps": [{"id": "b", "deps": []}]})).unwrap();
         assert!(g.get("b").unwrap().deps.is_empty());
 
-        apply_update(
-            &mut g,
-            &json!({"status": [{"id": "a", "status": "failed"}]}),
-        )
-        .unwrap();
-        assert_eq!(g.get("a").unwrap().status, Status::Failed);
         apply_update(&mut g, &json!({"reset": ["a"]})).unwrap();
         assert_eq!(g.get("a").unwrap().status, Status::Pending);
 
         apply_update(&mut g, &json!({"removeIds": ["c"]})).unwrap();
         assert!(g.get("c").is_none());
+    }
+
+    #[test]
+    fn update_cannot_mark_nodes_done() {
+        // Completion is dispatch-only: there is no `status` action, so a stray
+        // `status` field is ignored and cannot hand-mark a node done.
+        let mut g = seeded();
+        apply_update(&mut g, &json!({"status": [{"id": "a", "status": "done"}]})).unwrap();
+        assert_eq!(g.get("a").unwrap().status, Status::Pending);
     }
 
     #[test]

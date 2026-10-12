@@ -62,19 +62,21 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 
 | action | 参数 | 效果 |
 | --- | --- | --- |
-| `set` | `nodes[]`, `edges[]` | 建立/替换整张图 |
-| `update` | `add_nodes[]` / `remove_ids[]` / `set_deps[]` / `set_status[]` | 局部改图 |
+| `set` | `nodes[]` | 建立/替换整张图（校验 id 唯一、依赖存在、无环） |
+| `update` | `addNodes[]` / `removeIds[]` / `setDeps[]` / `reset[]` | 局部改图；**没有** `status` 写入 |
 | `show` | — | 渲染当前图 + 状态 |
 
-节点：`{ id, task, deps: [id], role?, maxTurns, timeoutSeconds, status }`
-`status ∈ {pending, ready, running, done, failed, skipped}`
+节点：`{ id, task, deps: [id], role?, provider?, model?, maxTurns?, timeoutSeconds?, expectFile?, verify? }`
+`status ∈ {pending, running, done, failed, skipped}`（**只由引擎写**）
+
+**完成只由 `dispatch` 写**：模型无法手动把节点标成 `done`（早期 `status` 动作会让模型绕过引擎“谎报完成”，已删除）；模型最多只能 `reset` 重排。
 
 **提交前守卫**：查环，有环直接拒绝（附环路径）。
 
 ### 5.2 `dispatch`（执行；代码调度）
 
 - 输入：无（读当前图）或 `{ maxParallel? }`。
-- 行为：算出 **ready set**（`status=pending && deps 全 done`）→ 在并发上限内**并行**起子进程 → 收集 → 标记 `done`/`failed` → 返回本波总结（每个节点：id/状态/产出摘要/耗时）。
+- 行为：算出 **ready set**（`status=pending && deps 全 done`）→ 在并发上限内**并行**起子进程 → 收集 → **逐节点验收**（`expectFile`/`verify`）→ 标记 `done`/`failed` → 返回本波总结。
 - **一次调用推进一波**：让每波结果回到编排层，模型才有机会改图。
 
 ## 6. 状态与预算
@@ -95,14 +97,16 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 
 ## 8. 守卫清单（必须，否则一定出事）
 
-- [ ] **环检测**：提交图前拒绝有环。
-- [ ] **无进展检测**：剩余节点全因依赖 `failed` 而 blocked → 报错，不死循环。
-- [ ] **并发上限**：semaphore（框架本身无上限，模型可能一次扇出几十个）。
-- [ ] **递归守卫**：子进程 `--exclude-tools subagent`（或 depth 环境变量）。
-- [ ] **输出截断**：子进程 stdout 截断后再回填（别把整段 transcript 灌回编排层）。
-- [ ] **取消贯通**：把 `execute` 的 `CancellationToken` 接到子进程 kill。
+- [x] **环检测**：提交图前拒绝有环。
+- [x] **无进展检测**：剩余节点全因依赖 `failed` 而 blocked → 报错，不死循环。
+- [x] **并发上限**：`maxParallel`（默认 4、上限 16）。
+- [x] **递归守卫**：子进程 `--exclude-tools subagent,plan,dispatch`，并打 `RPI_ORCHESTRATOR_SUBAGENT=1` 标记。
+- [x] **输出截断**：子进程 stdout 截断后再回填（40KB），节点结果摘要截到 2KB。
+- [ ] **取消贯通**：把 `execute` 的 `CancellationToken` 接到子进程 kill。**未做**：当前 builder 同步阻塞，取消标志要等 builder 返回才被看到。
 - [x] **配置透传**：子进程 `provider`/`model` 通过工具入参透传（父进程的 `--provider/--model` 不会被自动继承；宿主未暴露当前 model，扩展拿不到，故由调用方给出）。
-- [ ] **可观测**：子代理进度经 `StepResult::pending` 转 TUI。
+- [x] **完成只由引擎写**：`plan` 无 `status` 写入，`done`/`failed` 只能由 `dispatch` 写 → 堵住“模型谎报完成”。
+- [x] **逐节点验收**：子代理退出后检查 `expectFile`（文件须存在）/`verify`（命令须 exit 0），不满足标 `failed` → 堵住“子代理撞轮数上限仍 exit 0 被记为 done”的假成功。
+- [ ] **可观测**：子代理进度经 `StepResult::pending` 转 TUI。**未做**（同取消：当前同步 builder）。
 
 ## 9. 引导编排层生成 DAG
 

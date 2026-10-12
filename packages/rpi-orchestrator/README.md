@@ -35,10 +35,13 @@ Run one task in a fresh `rpi -p` subprocess and return its final answer.
 | action | params | effect |
 | --- | --- | --- |
 | `set` | `nodes` | replace the graph (validates ids, deps, acyclicity) |
-| `update` | `addNodes` / `removeIds` / `setDeps` / `status` / `reset` | edit the graph in place |
+| `update` | `addNodes` / `removeIds` / `setDeps` / `reset` | edit the graph in place |
 | `show` | — | render the graph |
 
-A node is `{id, task, deps[], role?, provider?, model?, maxTurns?, timeoutSeconds?}`.
+A node is `{id, task, deps[], role?, provider?, model?, maxTurns?, timeoutSeconds?, expectFile?, verify?}`.
+
+**Completion is written only by `dispatch`** — there is no way to hand-mark a node
+`done`, so a plan cannot be "completed" by the model. `reset` re-arms a node.
 
 ### `dispatch` — run one wave
 
@@ -52,7 +55,11 @@ Guards (all enforced in code, not asked of the model):
 - a cycle is rejected by `plan` before anything runs;
 - a wave with nothing ready and pending nodes left reports "no progress" instead
   of spinning;
-- a failed node makes its dependents `skipped` transitively.
+- a failed node makes its dependents `skipped` transitively;
+- **per-node acceptance**: after a child exits successfully, a node that declared
+  `expectFile` must have produced it, and one that declared `verify` must pass
+  its shell command — otherwise the node is `failed`. Without this a child that
+  hit its turn cap still exits 0 and would be recorded as `done`.
 
 ### Provider / model passthrough
 

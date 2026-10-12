@@ -53,6 +53,12 @@ pub struct Node {
     pub role: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// After the child exits successfully, this file must exist or the node is
+    /// marked failed. The engine trusts exit codes otherwise, which lets a child
+    /// that hit its turn cap "succeed" without producing anything.
+    pub expect_file: Option<String>,
+    /// After the child exits successfully, this shell command must exit 0.
+    pub verify: Option<String>,
     pub max_turns: u64,
     pub timeout_secs: u64,
     pub status: Status,
@@ -93,6 +99,8 @@ impl Node {
         let role = string_field(value, "role");
         let provider = string_field(value, "provider");
         let model = string_field(value, "model");
+        let expect_file = string_field(value, "expectFile");
+        let verify = string_field(value, "verify");
         let max_turns = clamp(
             value.get("maxTurns").and_then(Value::as_u64),
             DEFAULT_MAX_TURNS,
@@ -112,6 +120,8 @@ impl Node {
             role,
             provider,
             model,
+            expect_file,
+            verify,
             max_turns,
             timeout_secs,
             status: Status::Pending,
@@ -127,6 +137,8 @@ impl Node {
             "role": self.role,
             "provider": self.provider,
             "model": self.model,
+            "expectFile": self.expect_file,
+            "verify": self.verify,
             "maxTurns": self.max_turns,
             "timeoutSeconds": self.timeout_secs,
             "status": self.status.as_str(),

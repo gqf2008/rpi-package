@@ -6,7 +6,7 @@
 //! so the orchestrator sees the results and can reshape the graph before the
 //! next call.
 
-use crate::graph::Graph;
+use crate::graph::{Graph, Status};
 use crate::graph_state;
 use crate::kit::result_with_details;
 use crate::spawn;
@@ -54,14 +54,28 @@ pub fn dispatch(params: &Value) -> Result<String, String> {
     let outcomes = run_wave(&snapshot, &ready, max_parallel);
 
     for (id, outcome) in outcomes {
+        // Acceptance is checked only when the child reported success: a child that
+        // hit its turn cap still exits 0, so without this a no-op would be `done`.
+        let spec = snapshot.get(&id);
+        let verified = match &outcome {
+            Ok(_) => verify_node(
+                spec.and_then(|node| node.expect_file.as_deref()),
+                spec.and_then(|node| node.verify.as_deref()),
+            ),
+            Err(_) => Ok(()),
+        };
         if let Some(node) = guard.get_mut(&id) {
-            match outcome {
-                Ok(text) => {
-                    node.status = crate::graph::Status::Done;
+            match (outcome, verified) {
+                (Ok(text), Ok(())) => {
+                    node.status = Status::Done;
                     node.result = Some(summarize(&text));
                 }
-                Err(error) => {
-                    node.status = crate::graph::Status::Failed;
+                (Ok(text), Err(reason)) => {
+                    node.status = Status::Failed;
+                    node.result = Some(summarize(&format!("{reason}\n---\n{text}")));
+                }
+                (Err(error), _) => {
+                    node.status = Status::Failed;
                     node.result = Some(summarize(&error));
                 }
             }
@@ -71,6 +85,47 @@ pub fn dispatch(params: &Value) -> Result<String, String> {
 
     let text = format!("dispatched {} node(s)\n\n{}", ready.len(), guard.render());
     Ok(result_with_details(&text, guard.to_details()))
+}
+
+/// Check a node's declared acceptance criteria after its child exits.
+fn verify_node(expect_file: Option<&str>, verify: Option<&str>) -> Result<(), String> {
+    if let Some(file) = expect_file {
+        let path = std::path::Path::new(file);
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|dir| dir.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        };
+        if !resolved.exists() {
+            return Err(format!("expected file was not produced: {file}"));
+        }
+    }
+    if let Some(command) = verify {
+        if !run_verify_command(command)? {
+            return Err(format!("verification command failed: {command}"));
+        }
+    }
+    Ok(())
+}
+
+fn run_verify_command(command: &str) -> Result<bool, String> {
+    let status = if cfg!(windows) {
+        std::process::Command::new("cmd")
+            .arg("/C")
+            .arg(command)
+            .stdin(std::process::Stdio::null())
+            .status()
+    } else {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .stdin(std::process::Stdio::null())
+            .status()
+    }
+    .map_err(|err| format!("could not run verification command: {err}"))?;
+    Ok(status.success())
 }
 
 /// Run `ids` with at most `max_parallel` children at a time, preserving input
@@ -137,5 +192,19 @@ mod tests {
         let text = summarize(&long);
         assert!(text.ends_with('…'));
         assert!(text.len() <= RESULT_SUMMARY_BYTES + '…'.len_utf8());
+    }
+
+    #[test]
+    fn verify_node_checks_declared_files() {
+        assert!(verify_node(None, None).is_ok());
+        assert!(verify_node(Some("Cargo.toml"), None).is_ok());
+        assert!(verify_node(Some("no-such-file-orchestrator.txt"), None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_node_runs_declared_commands() {
+        assert!(verify_node(None, Some("true")).is_ok());
+        assert!(verify_node(None, Some("false")).is_err());
     }
 }
