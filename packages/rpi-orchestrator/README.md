@@ -22,8 +22,17 @@ Design and staged plan: [`DESIGN.md`](DESIGN.md).
 | --- | --- | --- | --- |
 | `task` | yes | — | 1–20000 bytes, non-empty |
 | `role` | no | `worker` | recorded only today |
+| `provider` | no | child default | passed to the child as `--provider` |
+| `model` | no | child default | passed to the child as `--model` |
 | `maxTurns` | no | 8 | 1–32 |
 | `timeoutSeconds` | no | 300 | 10–1800 |
+
+### Provider / model passthrough
+
+The child shares the orchestrator's agent dir, so with no `provider`/`model` it
+uses that dir's **default** provider. If the orchestrator was started with an
+explicit `--provider`/`--model`, pass the same values here so the child does not
+silently use a different (or misconfigured) default.
 
 **Stage 2 — DAG orchestration.** Adds `plan` (author/edit a task graph) and
 `dispatch` (run the ready set, one wave per call so the model can reshape the

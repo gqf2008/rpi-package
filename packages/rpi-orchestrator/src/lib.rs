@@ -28,6 +28,17 @@ fn clamp_u64(value: Option<u64>, default: u64, min: u64, max: u64) -> u64 {
     value.unwrap_or(default).clamp(min, max)
 }
 
+/// Read an optional string param, treating blank/whitespace as absent so an empty
+/// `provider` never becomes a bare `--provider` flag.
+fn optional_trimmed(params: &Value, name: &str) -> Option<String> {
+    params
+        .get(name)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn subagent(params: &Value) -> Result<String, String> {
     let task = kit::string_param(params, "task")?;
     if task.trim().is_empty() {
@@ -52,9 +63,24 @@ fn subagent(params: &Value) -> Result<String, String> {
         MAX_TIMEOUT_SECS,
     );
 
-    let output = spawn::run(&task, max_turns, timeout_secs)?;
+    // Optional provider/model passthrough. Without them the child falls back to
+    // the agent dir's *default* provider, which is not necessarily the one the
+    // orchestrator is using (and is broken outright on a machine whose default is
+    // misconfigured).
+    let provider = optional_trimmed(params, "provider");
+    let model = optional_trimmed(params, "model");
+
+    let output = spawn::run(
+        &task,
+        max_turns,
+        timeout_secs,
+        provider.as_deref(),
+        model.as_deref(),
+    )?;
     Ok(format!(
-        "[subagent role={role} turns<={max_turns} timeout={timeout_secs}s]\n{output}"
+        "[subagent role={role} turns<={max_turns} timeout={timeout_secs}s provider={} model={}]\n{output}",
+        provider.as_deref().unwrap_or("-"),
+        model.as_deref().unwrap_or("-"),
     ))
 }
 
@@ -62,7 +88,7 @@ export_single_tool_plugin!(
     subagent,
     "subagent",
     "Delegate one bounded task to a fresh rpi subprocess and return its final answer.",
-    r#"{"type":"object","properties":{"task":{"type":"string","maxLength":20000},"role":{"type":"string"},"maxTurns":{"type":"integer","minimum":1,"maximum":32},"timeoutSeconds":{"type":"integer","minimum":10,"maximum":1800}},"required":["task"]}"#
+    r#"{"type":"object","properties":{"task":{"type":"string","maxLength":20000},"role":{"type":"string"},"provider":{"type":"string"},"model":{"type":"string"},"maxTurns":{"type":"integer","minimum":1,"maximum":32},"timeoutSeconds":{"type":"integer","minimum":10,"maximum":1800}},"required":["task"]}"#
 );
 
 #[cfg(test)]
@@ -105,5 +131,18 @@ mod tests {
             ),
             DEFAULT_TIMEOUT_SECS
         );
+    }
+
+    #[test]
+    fn optional_trimmed_drops_blank_values() {
+        assert_eq!(
+            optional_trimmed(&serde_json::json!({ "provider": "deepseek" }), "provider"),
+            Some("deepseek".to_string())
+        );
+        assert_eq!(
+            optional_trimmed(&serde_json::json!({ "provider": "   " }), "provider"),
+            None
+        );
+        assert_eq!(optional_trimmed(&serde_json::json!({}), "model"), None);
     }
 }

@@ -100,7 +100,7 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 - [ ] **递归守卫**：子进程 `--exclude-tools subagent`（或 depth 环境变量）。
 - [ ] **输出截断**：子进程 stdout 截断后再回填（别把整段 transcript 灌回编排层）。
 - [ ] **取消贯通**：把 `execute` 的 `CancellationToken` 接到子进程 kill。
-- [ ] **配置透传**：父进程的 `--provider/--model` 显式传给子进程。
+- [x] **配置透传**：子进程 `provider`/`model` 通过工具入参透传（父进程的 `--provider/--model` 不会被自动继承；宿主未暴露当前 model，扩展拿不到，故由调用方给出）。
 - [ ] **可观测**：子代理进度经 `StepResult::pending` 转 TUI。
 
 ## 9. 引导编排层生成 DAG

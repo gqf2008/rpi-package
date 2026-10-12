@@ -29,13 +29,30 @@ pub const MAX_TURNS_ENV: &str = "RPI_MAX_TURNS_PER_RUN";
 
 /// Build the child command. Separate from `run` so it is unit-testable without
 /// spawning anything.
-pub fn child_command(exe: &Path, max_turns: u64) -> Command {
+///
+/// `provider` / `model` are passed through as `--provider` / `--model`. The child
+/// shares the orchestrator's agent dir, so without them it silently falls back to
+/// the *default* provider — which is wrong (or broken) whenever the orchestrator
+/// itself was started with an explicit `--provider` / `--model`.
+pub fn child_command(
+    exe: &Path,
+    max_turns: u64,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Command {
     let mut command = Command::new(exe);
     command
         .arg("-p")
         // Recursion guard: the child must not offer `subagent` again.
         .arg("--exclude-tools")
-        .arg(TOOL_NAME)
+        .arg(TOOL_NAME);
+    if let Some(provider) = provider.filter(|value| !value.is_empty()) {
+        command.arg("--provider").arg(provider);
+    }
+    if let Some(model) = model.filter(|value| !value.is_empty()) {
+        command.arg("--model").arg(model);
+    }
+    command
         // Hard turn ceiling enforced by the harness, not the model.
         .env(MAX_TURNS_ENV, max_turns.to_string())
         .stdin(Stdio::piped())
@@ -60,10 +77,16 @@ pub fn truncate_output(mut text: String) -> String {
 }
 
 /// Run one delegation using the current executable as the child `rpi`.
-pub fn run(task: &str, max_turns: u64, timeout_secs: u64) -> Result<String, String> {
+pub fn run(
+    task: &str,
+    max_turns: u64,
+    timeout_secs: u64,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<String, String> {
     let exe = std::env::current_exe()
         .map_err(|err| format!("cannot resolve the rpi executable: {err}"))?;
-    run_with_exe(&exe, task, max_turns, timeout_secs)
+    run_with_exe(&exe, task, max_turns, timeout_secs, provider, model)
 }
 
 /// Run one delegation with an explicit executable (test seam).
@@ -72,8 +95,10 @@ pub fn run_with_exe(
     task: &str,
     max_turns: u64,
     timeout_secs: u64,
+    provider: Option<&str>,
+    model: Option<&str>,
 ) -> Result<String, String> {
-    let mut child = child_command(exe, max_turns)
+    let mut child = child_command(exe, max_turns, provider, model)
         .spawn()
         .map_err(|err| format!("failed to start subagent `{}`: {err}", exe.display()))?;
 
@@ -148,7 +173,7 @@ mod tests {
 
     #[test]
     fn child_command_sets_recursion_guard_and_turn_budget() {
-        let command = child_command(Path::new("/usr/bin/rpi"), 7);
+        let command = child_command(Path::new("/usr/bin/rpi"), 7, None, None);
         let args: Vec<String> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -167,6 +192,40 @@ mod tests {
             })
             .collect();
         assert_eq!(envs, vec![(MAX_TURNS_ENV.to_string(), "7".to_string())]);
+    }
+
+    #[test]
+    fn child_command_passes_provider_and_model_through() {
+        let command = child_command(
+            Path::new("/usr/bin/rpi"),
+            8,
+            Some("deepseek"),
+            Some("deepseek-flash"),
+        );
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "-p",
+                "--exclude-tools",
+                "subagent",
+                "--provider",
+                "deepseek",
+                "--model",
+                "deepseek-flash",
+            ]
+        );
+
+        // Empty strings must be dropped rather than emitted as bare flags.
+        let bare = child_command(Path::new("/usr/bin/rpi"), 8, Some(""), None);
+        let bare_args: Vec<String> = bare
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(bare_args, vec!["-p", "--exclude-tools", "subagent"]);
     }
 
     #[test]
