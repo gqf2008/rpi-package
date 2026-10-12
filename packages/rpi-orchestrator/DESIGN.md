@@ -110,7 +110,7 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 
 ## 9. 引导编排层生成 DAG
 
-- **已实现（opt-in）**：`before_agent_start` 往 system prompt 追加一段“多步/可并行任务 → 先 plan 建图、dispatch 一波波推进、按结果 update 改图”的引导。**默认关闭**，设 `RPI_ORCHESTRATOR_GUIDE=1` 才注入（本扩展全局安装，无条件注入会影响所有会话）。子代理不注入（`RPI_ORCHESTRATOR_SUBAGENT=1` 标记）。
+- **已实现（goal 隐含）**：`before_agent_start` 往 system prompt 追加一段“多步/可并行任务 → 先 plan 建图、dispatch 一波波推进、按结果 update 改图”的引导。**只要项目里有 active goal 就自动开启**（读 `.rpi/goals.json`）——`/goal` 即隐含编排，无需环境变量。`RPI_ORCHESTRATOR_GUIDE` 仅作**覆盖**：`0/false/no/off` 强制关、`1/true/yes/on` 强制开。子代理不注入（`RPI_ORCHESTRATOR_SUBAGENT=1` 标记）。
 - 未做：每轮把**当前图状态**单独注入 context——目前依赖工具结果本身留在 context 里（`plan`/`dispatch` 的输出含图状态），实测够用。
 
 实测（引导开启、无人职守）：模型自建 5 节点图（4 独立 + 1 依赖），先后两次 `dispatch`（4 并行 → 1），全部完成。**不加引导时它根本不用这套工具**。

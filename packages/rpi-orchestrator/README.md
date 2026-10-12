@@ -94,16 +94,16 @@ The task is written to the child's **stdin** rather than passed positionally:
 `-` would otherwise be parsed as a CLI flag. Piped stdin becomes the initial
 prompt (`rpi-cli::app::build_initial_message`).
 
-## Autonomy (opt-in guidance)
+## Autonomy (goal-implied guidance)
 
 Left alone, a capable orchestrator model just does the work itself (it solved a
 test goal with `bash` and never touched `plan`/`dispatch`). To make it actually
-orchestrate, this extension can append a short workflow section to the system
-prompt — **only when opted in**, because it is installed globally:
+orchestrate, this extension appends a short workflow section to the system prompt
+whenever `rpi-goal` has an **active goal** in the project — `/goal` implies
+orchestration, so no variable is needed.
 
-```bash
-RPI_ORCHESTRATOR_GUIDE=1 rpi -p "..."
-```
+`RPI_ORCHESTRATOR_GUIDE` only *overrides* that decision: `=0/false/no/off` forces
+it off even with a goal, `=1/true/yes/on` forces it on even without one.
 
 The guidance is never injected into a subagent (children carry
 `RPI_ORCHESTRATOR_SUBAGENT=1` and get no `plan`/`dispatch` anyway).

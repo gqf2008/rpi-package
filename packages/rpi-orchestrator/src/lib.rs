@@ -44,10 +44,16 @@ const PLAN_PARAMS: &str = r#"{"type":"object","properties":{"action":{"type":"st
 
 const DISPATCH_PARAMS: &str = r#"{"type":"object","properties":{"maxParallel":{"type":"integer","minimum":1,"maximum":16,"description":"max concurrent subagents for this wave (default 4)"}}}"#;
 
-/// Opt-in switch for the orchestration guidance injected into the system prompt.
-/// Off by default: this extension is installed globally, so silently rewriting
-/// every session's prompt would be intrusive.
+/// Optional override for the orchestration guidance injected into the system
+/// prompt. Guidance is **on by default whenever a goal is active** — `/goal`
+/// implies orchestration, so no variable is needed. This only forces the decision:
+/// `0/false/no/off` disables it even with a goal, `1/true/yes/on` enables it even
+/// without one.
 pub const GUIDE_ENV: &str = "RPI_ORCHESTRATOR_GUIDE";
+
+/// Project-relative path of `rpi-goal`'s state. An active goal there is what turns
+/// the guidance on — a deliberate coupling to `/goal` mode.
+const GOALS_FILE: &str = ".rpi/goals.json";
 
 const GUIDE_HEADING: &str = "## Subagent orchestration";
 
@@ -67,11 +73,36 @@ A subagent starts fresh and cannot see this conversation, so each node's `task`
 must contain everything it needs. Prefer this over hand-rolling the whole
 workflow with `bash`."#;
 
-fn guide_enabled_from(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
+/// Tri-state read of [`GUIDE_ENV`]: `Some(true)` force on, `Some(false)` force
+/// off, `None` means "decide from the goal state".
+fn guide_override(value: Option<&str>) -> Option<bool> {
+    match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("1" | "true" | "yes" | "on") => Some(true),
+        Some("0" | "false" | "no" | "off") => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether `rpi-goal` has an active goal in this project. Parsed leniently: any
+/// read or parse problem simply means "no goal".
+fn active_goal_from(text: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    let Some(active) = value.get("active") else {
+        return false;
+    };
+    !active.is_null() && active.get("status").and_then(Value::as_str) == Some("active")
+}
+
+fn active_goal_in_project() -> bool {
+    let Ok(cwd) = std::env::current_dir() else {
+        return false;
+    };
+    match std::fs::read_to_string(cwd.join(GOALS_FILE)) {
+        Ok(text) => active_goal_from(&text),
+        Err(_) => false,
+    }
 }
 
 fn guide_enabled() -> bool {
@@ -80,7 +111,9 @@ fn guide_enabled() -> bool {
     if std::env::var(crate::spawn::SUBAGENT_ENV).is_ok() {
         return false;
     }
-    guide_enabled_from(std::env::var(GUIDE_ENV).ok().as_deref())
+    // `/goal` implies orchestration: an active goal turns the guidance on unless
+    // the variable explicitly overrides the decision.
+    guide_override(std::env::var(GUIDE_ENV).ok().as_deref()).unwrap_or_else(active_goal_in_project)
 }
 
 fn write_out(out: &mut rpi_plugin_sdk::callbacks::Output<'_>, value: Value) {
@@ -202,12 +235,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn guide_switch_accepts_common_truthy_values() {
+    fn guide_env_override_is_tri_state() {
         for value in ["1", "true", "TRUE", "yes", "on", " on "] {
-            assert!(guide_enabled_from(Some(value)), "{value} should enable");
+            assert_eq!(guide_override(Some(value)), Some(true), "{value}");
         }
-        for value in [None, Some(""), Some("0"), Some("false"), Some("nope")] {
-            assert!(!guide_enabled_from(value), "{value:?} should not enable");
+        for value in ["0", "false", "no", "off", " OFF "] {
+            assert_eq!(guide_override(Some(value)), Some(false), "{value}");
         }
+        assert_eq!(guide_override(None), None);
+        assert_eq!(guide_override(Some("")), None);
+        assert_eq!(guide_override(Some("whatever")), None);
+    }
+
+    #[test]
+    fn active_goal_is_detected_from_the_project_state() {
+        assert!(active_goal_from(
+            r#"{"active":{"status":"active"},"archived":[]}"#
+        ));
+        assert!(!active_goal_from(r#"{"active":null,"archived":[]}"#));
+        assert!(!active_goal_from(r#"{"active":{"status":"paused"}}"#));
+        assert!(!active_goal_from(r#"{"active":{"status":"complete"}}"#));
+        assert!(!active_goal_from("{}"));
+        assert!(!active_goal_from("not json"));
     }
 }
