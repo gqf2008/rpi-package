@@ -17,7 +17,7 @@
 | tool 结果自动回流并驱动下一轮 | `crates/rpi-agent/src/agent_loop.rs:225-330`（结果按序 append 回 context，`while has_more_tool_calls` 继续） | 回流**框架已就绪** |
 | 插件工具的同步 `poll` 由 blocking driver 驱动 | `crates/rpi-extensions/src/tool.rs:444`（`spawn_blocking` 里循环 poll，转 `Pending` 为 partial） | 扩展里起子进程**不会饿死** tokio worker |
 | 扩展可在自身进程内起子进程 | `rpi-package/packages/rpi-lens/src/lib.rs:25-70`（`Command::new` + `wait_timeout` + 40k 截断） | 有**现成先例** |
-| 状态型工具可把状态存 tool result `details`、按分支重放 | `rpi-package/packages/rpi-todo`（README：“reconstructed by replaying tool results on the current branch”） | DAG 状态的**存储范式** |
+| 状态型工具可把状态存 tool result `details` | `rpi-package/packages/rpi-todo` | 参考过其“按分支重放”；**最终未采用**（改为单次进程内存，见 §6） |
 | 轮数/时长预算 + 超限自动 pause + 注入 context | `rpi-package/packages/rpi-goal`（README “Budgets”：`maxTurns` / `deadlineMs`） | 预算的**现成范式** |
 | 单次 run 的轮数硬上限 | `crates/rpi-harness/src/run_budget.rs`（`RPI_MAX_TURNS_PER_RUN`） | 子进程轮数预算落点 |
 | `rpi-subagents` 的 `delegate_task` 只产信封、无消费者 | `rpi-package/packages/rpi-subagents/src/lib.rs:8-31`；README：“scheduling remains a host responsibility” | **不复用该信封**，改做真执行 |
@@ -137,7 +137,7 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 协作架构图（与宿主 / `rpi-goal` / `rpi-mcp-adapter`）见 [`ARCHITECTURE.md`](ARCHITECTURE.md)。
 
 - 子进程 + 超时 + 截断：`rpi-package/packages/rpi-lens/src/lib.rs:25-70`
-- 状态存 `details` + 分支重放：`rpi-package/packages/rpi-todo`
+- 状态型工具存 `details`：`rpi-package/packages/rpi-todo`（其“分支重放”**未采用**，见 §6）
 - 轮数/时长预算 + auto-pause + context 注入：`rpi-package/packages/rpi-goal`
 - 插件工具 poll 驱动（非阻塞/进度）：`crates/rpi-extensions/src/tool.rs:444`
 - 轮数上限环境变量：`crates/rpi-harness/src/run_budget.rs`
