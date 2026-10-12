@@ -31,6 +31,32 @@ fn last_injected() -> &'static Mutex<Option<String>> {
     LAST_INJECTED.get_or_init(|| Mutex::new(None))
 }
 
+/// A goal notice queued by a state change that happened **inside a tool batch**
+/// (the `goal` tool). Appending it immediately would place a custom message
+/// between an `assistant(tool_calls)` message and its `toolResult`, which strict
+/// OpenAI-compatible providers reject with HTTP 400 ("An assistant message with
+/// 'tool_calls' must be followed by tool messages…"). The notice is flushed at a
+/// safe boundary instead (TurnEnd, or the end of the `/goal` command handler).
+static PENDING_INJECT: OnceLock<Mutex<Option<Goal>>> = OnceLock::new();
+
+fn pending_inject() -> &'static Mutex<Option<Goal>> {
+    PENDING_INJECT.get_or_init(|| Mutex::new(None))
+}
+
+fn queue_inject(goal: &Goal) {
+    *pending_inject().lock().unwrap_or_else(|p| p.into_inner()) = Some(goal.clone());
+}
+
+fn flush_pending_inject() {
+    let goal = pending_inject()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    if let Some(goal) = goal {
+        let _ = append_goal_custom_message(&goal);
+    }
+}
+
 /// Call a host runtime action (e.g. `AppendEntry`). Safe from any thread,
 /// including event handlers and command handlers.
 fn call_runtime(id: RuntimeActionId, args: Value) -> Result<Value, String> {
@@ -329,12 +355,16 @@ fn validate_notes(notes: &str) -> Result<String, String> {
     Ok(notes.to_string())
 }
 
-/// Persist `goal` as the active goal and inject it into the model context.
-fn persist_and_inject(goals: &Goals, goal: &Goal) -> Result<(), String> {
+/// Persist `goal` as the active goal and queue its context injection.
+///
+/// The notice is appended at the next safe boundary (`flush_pending_inject`),
+/// never inline: a state change from the `goal` tool runs inside a tool batch,
+/// where an immediate append would split `tool_calls` from its `toolResult`.
+fn persist_and_queue(goals: &Goals, goal: &Goal) -> Result<(), String> {
     let mut goals = goals.clone();
     goals.active = Some(goal.clone());
     write_goals(&goals)?;
-    let _ = append_goal_custom_message(goal);
+    queue_inject(goal);
     remember_injected(Some(fingerprint(goal)));
     Ok(())
 }
@@ -362,7 +392,7 @@ fn op_start(
     if let Some(old) = goals.active.take() {
         goals.archived.push(old);
     }
-    persist_and_inject(&goals, &goal)?;
+    persist_and_queue(&goals, &goal)?;
     Ok(goal)
 }
 
@@ -379,7 +409,7 @@ fn op_update(notes: Option<&str>, status: Option<&str>) -> Result<Goal, String> 
         updated.status = status.to_string();
     }
     updated.updated_at = now_ms();
-    persist_and_inject(&goals, &updated)?;
+    persist_and_queue(&goals, &updated)?;
     Ok(updated)
 }
 
@@ -417,7 +447,7 @@ fn op_set_limits(
     let goals = read_goals();
     let active = require_active(&goals)?;
     let updated = apply_limits(&active, now_ms(), max_turns, deadline_ms);
-    persist_and_inject(&goals, &updated)?;
+    persist_and_queue(&goals, &updated)?;
     Ok(updated)
 }
 
@@ -429,7 +459,7 @@ fn op_complete() -> Result<Goal, String> {
     goals.archived.push(done.clone());
     goals.active = None;
     write_goals(&goals)?;
-    let _ = append_goal_custom_message(&done);
+    queue_inject(&done);
     remember_injected(Some(fingerprint(&done)));
     Ok(done)
 }
@@ -752,6 +782,8 @@ use rpi_plugin_sdk::callbacks::free_string;
 extern "C" fn on_turn_end(event: StablePluginEvent, _: *mut c_void) -> i32 {
     // TurnEnd carries no payload (empty event) in this ABI; ignore the struct.
     let _ = event;
+    // Safe boundary: flush any notice queued during this turn's tool batch.
+    flush_pending_inject();
     let mut goals = read_goals();
     let Some(mut goal) = goals.active.clone() else {
         // No active goal — nothing to inject.
@@ -944,6 +976,9 @@ fn goal_command(args_json, out, _user_data) {
         .unwrap_or("")
         .trim();
     let text = run_command(args);
+    // The command runs outside any tool batch, so injecting right here is safe —
+    // and necessary: the goal must be in context before the next prompt.
+    flush_pending_inject();
     command_output(out, json!({"kind": "message", "text": text}))
 }
 }
