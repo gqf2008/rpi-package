@@ -18,3 +18,8 @@ crate-type = ["cdylib", "rlib"]
 rpi-plugin-sdk = { workspace = true }
 serde_json = { workspace = true }
 wait-timeout = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# Kill the child's whole process group so a subagent's descendants (e.g. a
+# background `sleep`) do not survive as orphans when we cancel.
+nix = { version = "0.29", features = ["process", "signal"] }

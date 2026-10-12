@@ -102,7 +102,7 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 - [x] **并发上限**：`maxParallel`（默认 4、上限 16）。
 - [x] **递归守卫**：子进程 `--exclude-tools subagent,plan,dispatch`，并打 `RPI_ORCHESTRATOR_SUBAGENT=1` 标记。
 - [x] **输出截断**：子进程 stdout 截断后再回填（40KB），节点结果摘要截到 2KB。
-- [x] **取消贯通**：工具 builder 改到工作线程（`poll` 非阻塞），`cancel`/`destroy` 置位 `Control`；`spawn` 等待循环每 100ms 检查 `Control` 并 `kill` 子进程，`destroy` 不持锁 join（单测 `cancellation_kills_a_running_child` 覆盖）。**已知宿主限制**：print 模式的 SIGINT 不会触发 run 取消（`ctrl_c` 只在 server / plugin-stdio 分支安装，`rpi-cli/src/app.rs:464`），所以只有 TUI Ctrl+C / RPC abort 才会走到这条取消链路。
+- [x] **取消贯通**：工具 builder 在工作线程（`poll` 非阻塞）；`cancel`/`destroy` 置位 `Control`；`spawn` 每 100ms 检查并**递归杀整棵进程树**（孙进程可能被宿主的 bash 工具重新分组，单靠组 kill 会漏），`destroy` 不持锁 join。**e2e**：`rpi --mode rpc` 发 `abort` → 子 rpi 与孙 `sleep` 均被杀，无孤儿（单测 `cancellation_kills_a_running_child` / `cancellation_kills_the_whole_process_group`）。**已知宿主限制**：print 模式 SIGINT 不触发 run 取消（`ctrl_c` 只在 server / plugin-stdio 分支安装，`rpi-cli/src/app.rs:464`），只有 TUI Ctrl+C / RPC abort 会走到这条链路。
 - [x] **配置透传**：子进程 `provider`/`model` 通过工具入参透传（父进程的 `--provider/--model` 不会被自动继承；宿主未暴露当前 model，扩展拿不到，故由调用方给出）。
 - [x] **完成只由引擎写**：`plan` 无 `status` 写入，`done`/`failed` 只能由 `dispatch` 写 → 堵住“模型谎报完成”。
 - [x] **逐节点验收**：子代理退出后检查 `expectFile`（文件须存在）/`verify`（命令须 exit 0），不满足标 `failed` → 堵住“子代理撞轮数上限仍 exit 0 被记为 done”的假成功。
@@ -117,16 +117,16 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 
 ## 10. 验收用例
 
-- [ ] AC1：给一个含 5 个独立节点的图，一次 `dispatch` 并行执行，5 份结果全部回填且 `done`。
-- [ ] AC2：链式依赖 A→B→C，须分 3 波执行，顺序正确，不早跑。
-- [ ] AC3：某节点 `failed` → 下游 `skipped`，`dispatch` 返回“无进展可推进”而非死循环。
-- [ ] AC4：提交含环的图 → 被拒绝并给出环路径。
-- [ ] AC5：某节点超 `timeoutSeconds` → 被 kill，标记 `failed`，其余节点不受影响。
-- [ ] AC6：子进程 `RPI_MAX_TURNS_PER_RUN` 生效，超轮即停。
-- [ ] AC7：编排层 `deadlineMs` 到期 → auto-pause 并注入提示。
-- [ ] AC8：取消编排层 → 所有在跑子进程被 kill，无孤儿。
-- [ ] AC9：fork/树导航后，图状态按分支正确重放。
-- [ ] AC10：子进程默认不注册 `subagent` 工具（无递归）。
+- [x] AC1：多独立节点一次 `dispatch` 并行执行、结果全部回填 —— e2e：4 节点一波并行（big test）+ 2 节点一波（scripted）。
+- [x] AC2：依赖门控、分波执行、不早跑 —— 单测 `ready_set_respects_dependencies`；e2e 三波 `set(1)→dispatch→addNodes(2)→dispatch→addNodes(1)→dispatch`。
+- [x] AC3：节点 `failed` → 下游 `skipped`、不空转 —— 单测 `failed_dependency_skips_downstream_transitively` + `dispatch` 的 no-progress 守卫。
+- [x] AC4：含环的图被拒 —— 单测 `rejects_cycles`。
+- [x] AC5：超 `timeoutSeconds` 被 kill 标 `failed` —— 与取消同一条 `kill_and_reap` 路径（单测覆盖 kill）。
+- [x] AC6：`RPI_MAX_TURNS_PER_RUN` 生效 —— 实测子代理撞 `maxTurns=2` 提前停（也因此暴露“假成功”，已用 `expectFile` 验收修复）。
+- [ ] AC7：编排层 `deadlineMs` 到期 auto-pause —— **不在本扩展**，由 `rpi-goal` 承担。
+- [x] AC8：取消 → 在跑子进程全被 kill、无孤儿 —— **e2e（RPC abort）**：子 rpi 与孙 `sleep` 均被杀。
+- [ ] AC9：fork/树导航后图状态按分支重放 —— 机制已实现（`SessionStart`/`SessionTree` 重放 `details`），**未做 e2e**。
+- [x] AC10：子进程默认无编排工具（无递归）—— 启动参数 `--exclude-tools subagent,plan,dispatch`（单测）+ 引导跳过 `RPI_ORCHESTRATOR_SUBAGENT=1`。
 
 ## 11. 参考实现锚点
 

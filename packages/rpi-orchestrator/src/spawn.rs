@@ -69,6 +69,13 @@ pub fn child_command(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Own process group, so cancelling can kill the child *and its descendants*
+    // instead of orphaning whatever it spawned.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     command
 }
 
@@ -180,8 +187,38 @@ pub fn run_with_exe(
 }
 
 fn kill_and_reap(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        // Descendants can re-group: rpi's own `bash` tool puts each shell in a new
+        // process group, so a group kill from here would miss them. Walk the tree
+        // first (while it is still attached), then kill the group and the child.
+        kill_descendants(child.id());
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        let _ = kill(Pid::from_raw(-(child.id() as i32)), Signal::SIGKILL);
+    }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Best-effort recursive SIGKILL of `pid` and everything below it (unix).
+#[cfg(unix)]
+fn kill_descendants(pid: u32) {
+    if let Ok(output) = std::process::Command::new("pgrep")
+        .arg("-P")
+        .arg(pid.to_string())
+        .output()
+    {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Ok(child) = line.trim().parse::<u32>() {
+                kill_descendants(child);
+            }
+        }
+    }
+    let _ = std::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(pid.to_string())
+        .status();
 }
 
 fn write_stdin(child: &mut Child, task: &str) {
@@ -286,6 +323,54 @@ mod tests {
         assert!(out.starts_with('あ'));
         assert!(out.ends_with("[subagent output truncated]"));
         assert!(out.len() <= MAX_OUTPUT_BYTES + "\n[subagent output truncated]".len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_kills_the_whole_process_group() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // The child backgrounds a `sleep` (a grandchild) and records its pid, then
+        // waits. Cancelling must kill the group, not just the direct child.
+        let dir = std::env::temp_dir();
+        let script = dir.join(format!("orch-group-{}.sh", std::process::id()));
+        let pidfile = dir.join(format!("orch-group-{}.pid", std::process::id()));
+        {
+            let mut file = std::fs::File::create(&script).unwrap();
+            writeln!(file, "#!/bin/sh").unwrap();
+            writeln!(file, "sleep 30 &").unwrap();
+            writeln!(file, "echo $! > {}", pidfile.display()).unwrap();
+            writeln!(file, "wait").unwrap();
+        }
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let control = Control::default();
+        let canceller = control.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(800));
+            canceller.cancel();
+        });
+        let _ = run_with_exe(&script, "ignored", 8, 30, None, None, &control);
+        let _ = handle.join();
+
+        let grandchild = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok());
+        std::thread::sleep(Duration::from_millis(300));
+        if let Some(pid) = grandchild {
+            let alive = std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            assert!(!alive, "grandchild {pid} survived the process-group kill");
+        }
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&pidfile);
     }
 
     #[test]

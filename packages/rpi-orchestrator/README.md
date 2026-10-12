@@ -62,7 +62,9 @@ Guards (all enforced in code, not asked of the model):
   hit its turn cap still exits 0 and would be recorded as `done`;
 - **non-blocking and cancellable**: each tool's builder runs on a worker thread,
   so `poll` never blocks. Progress streams as a pending partial (per wave for
-  `dispatch`), and cancelling the run kills in-flight children within ~100 ms.
+  `dispatch`), and cancelling the run kills the in-flight child **and its
+  descendants** within ~100 ms — the tree is walked because nested shells
+  (rpi's own `bash` tool) put themselves in a new process group.
 
 ### Provider / model passthrough
 
