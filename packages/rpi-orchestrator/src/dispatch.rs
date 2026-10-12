@@ -140,6 +140,7 @@ pub fn dispatch(
 /// if the child logic panics, so a `dispatch` waiting for the running set to
 /// drain cannot hang forever.
 fn spawn_node_worker(id: String, node: Node, control: Control, progress_tx: Progress) {
+    let generation = crate::current_generation();
     std::thread::spawn(move || {
         progress(&progress_tx, &format!("[dispatch] {id} running"));
         let cleanup_id = id.clone();
@@ -159,6 +160,10 @@ fn spawn_node_worker(id: String, node: Node, control: Control, progress_tx: Prog
                 Ok(_) => verify_node(node.expect_file.as_deref(), node.verify.as_deref()),
                 Err(_) => Ok(()),
             };
+            if crate::current_generation() != generation {
+                // The plan was replaced while this node ran; drop the stale result.
+                return;
+            }
             let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
             if let Some(slot) = graph.get_mut(&id) {
                 match (outcome, verified) {
@@ -178,7 +183,7 @@ fn spawn_node_worker(id: String, node: Node, control: Control, progress_tx: Prog
             }
             graph.propagate_skips();
         }));
-        if ran.is_err() {
+        if ran.is_err() && crate::current_generation() == generation {
             // A panicked worker must still leave the node terminal, or it is stuck
             // `running` and any draining wait never returns.
             let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());

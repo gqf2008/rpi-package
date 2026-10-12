@@ -27,8 +27,10 @@ pub fn plan(params: &Value, control: &Control, _progress: &Progress) -> Result<S
                 .get("nodes")
                 .ok_or("`nodes` is required for action=set")?;
             let graph = Graph::from_nodes_value(nodes)?;
-            // A new plan replaces the work in flight: stop whatever is running.
+            // A new plan replaces the work in flight: stop what is running and
+            // invalidate in-flight workers so they cannot write onto reused ids.
             stop_all_running();
+            crate::bump_generation();
             *guard = graph;
         }
         "update" => {

@@ -25,7 +25,7 @@ mod subagent;
 
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::control::Control;
@@ -40,6 +40,18 @@ static HOST_ABORT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
 pub(crate) fn host_abort_flag() -> Arc<AtomicBool> {
     Arc::clone(HOST_ABORT.get_or_init(|| Arc::new(AtomicBool::new(false))))
+}
+
+/// Bumped whenever the graph is replaced (`plan set`), so a worker from the old
+/// graph cannot write its result onto a new node that reuses the same id.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn current_generation() -> u64 {
+    GENERATION.load(Ordering::SeqCst)
+}
+
+pub(crate) fn bump_generation() -> u64 {
+    GENERATION.fetch_add(1, Ordering::SeqCst) + 1
 }
 
 /// A node token linked to the host-abort signal (and independently cancellable).
@@ -155,6 +167,9 @@ rpi_plugin_sdk::string_handler! {
 /// `{}` (no change) otherwise. A malformed envelope declines rather than
 /// replacing the host's prompt with our section alone.
 fn on_before_agent_start(event_json, out, _user_data) {
+    // A new run starts fresh: clear the previous run's abort, or a background node
+    // started now would be cancelled on sight.
+    host_abort_flag().store(false, Ordering::SeqCst);
     if !guide_enabled() {
         write_out(out, serde_json::json!({}));
         return 0;
