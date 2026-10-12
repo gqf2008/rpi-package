@@ -78,6 +78,24 @@ The task is written to the child's **stdin** rather than passed positionally:
 `-` would otherwise be parsed as a CLI flag. Piped stdin becomes the initial
 prompt (`rpi-cli::app::build_initial_message`).
 
+## Autonomy (opt-in guidance)
+
+Left alone, a capable orchestrator model just does the work itself (it solved a
+test goal with `bash` and never touched `plan`/`dispatch`). To make it actually
+orchestrate, this extension can append a short workflow section to the system
+prompt — **only when opted in**, because it is installed globally:
+
+```bash
+RPI_ORCHESTRATOR_GUIDE=1 rpi -p "..."
+```
+
+The guidance is never injected into a subagent (children carry
+`RPI_ORCHESTRATOR_SUBAGENT=1` and get no `plan`/`dispatch` anyway).
+
+With it on, an unattended run of “four independent crate summaries plus a
+dependent index” self-planned a 5-node graph, ran the four summaries in one
+parallel wave, then the index node after them, and finished — no human relaying.
+
 ## Recursion guard
 
 The child is launched with `--exclude-tools subagent,plan,dispatch`, so a

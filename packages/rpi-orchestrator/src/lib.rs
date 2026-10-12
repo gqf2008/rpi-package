@@ -125,8 +125,94 @@ const PLAN_PARAMS: &str = r#"{"type":"object","properties":{"action":{"type":"st
 
 const DISPATCH_PARAMS: &str = r#"{"type":"object","properties":{"maxParallel":{"type":"integer","minimum":1,"maximum":16,"description":"max concurrent subagents for this wave (default 4)"}}}"#;
 
+/// Opt-in switch for the orchestration guidance injected into the system prompt.
+/// Off by default: this extension is installed globally, so silently rewriting
+/// every session's prompt would be intrusive.
+pub const GUIDE_ENV: &str = "RPI_ORCHESTRATOR_GUIDE";
+
+const GUIDE_HEADING: &str = "## Subagent orchestration";
+
+const GUIDE_SECTION: &str = r#"## Subagent orchestration
+
+For work that has several steps, or steps that can run in parallel, use the
+`plan` and `dispatch` tools instead of doing everything inline:
+
+1. `plan` with action=set: write the task graph as nodes, each with an `id`, a
+   self-contained `task`, and its `deps`.
+2. `dispatch`: run the current ready wave. Nodes whose dependencies are done run
+   in parallel (up to `maxParallel`).
+3. Read the results, then `plan` with action=update (add/remove/re-dep/reset
+   nodes) and `dispatch` again until the goal is met.
+
+A subagent starts fresh and cannot see this conversation, so each node's `task`
+must contain everything it needs. Prefer this over hand-rolling the whole
+workflow with `bash`."#;
+
+fn guide_enabled_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+fn guide_enabled() -> bool {
+    // Never inject into a subagent: it has no `plan`/`dispatch`, and telling it to
+    // use them would just waste a turn.
+    if std::env::var(crate::spawn::SUBAGENT_ENV).is_ok() {
+        return false;
+    }
+    guide_enabled_from(std::env::var(GUIDE_ENV).ok().as_deref())
+}
+
+fn write_out(out: &mut rpi_plugin_sdk::callbacks::Output<'_>, value: Value) {
+    if out.is_available() {
+        out.write(value.to_string());
+    }
+}
+
+rpi_plugin_sdk::string_handler! {
+/// Append the orchestration guidance to the system prompt, only when opted in.
+///
+/// Replacement contract: the handler reads the base prompt from the event's
+/// `systemPrompt` and writes `{"systemPrompt": "..."}` when it changed it, or
+/// `{}` (no change) otherwise. A malformed envelope declines rather than
+/// replacing the host's prompt with our section alone.
+fn on_before_agent_start(event_json, out, _user_data) {
+    if !guide_enabled() {
+        write_out(out, serde_json::json!({}));
+        return 0;
+    }
+    let parsed: Value = match serde_json::from_str(event_json) {
+        Ok(value) => value,
+        Err(_) => {
+            write_out(out, serde_json::json!({}));
+            return 0;
+        }
+    };
+    let base = parsed
+        .get("systemPrompt")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if base.contains(GUIDE_HEADING) {
+        write_out(out, serde_json::json!({}));
+        return 0;
+    }
+    let next = format!("{base}\n\n{GUIDE_SECTION}");
+    write_out(out, serde_json::json!({"systemPrompt": next}));
+    0
+}
+}
+
 rpi_plugin_sdk::export_plugin!(|api| {
     let _ = RUNTIME.set(*api);
+
+    if let Some(register_prompt) = api.register_before_agent_start {
+        let _ = register_prompt(
+            on_before_agent_start,
+            rpi_plugin_sdk::callbacks::free_string,
+            api.user_data,
+        );
+    }
 
     if let Some(register_event) = api.register_event_handler {
         for tag in [
@@ -222,5 +308,15 @@ mod tests {
 
         restore_from_result("plan", &result);
         assert_eq!(graph_state().lock().unwrap().nodes.len(), 1);
+    }
+
+    #[test]
+    fn guide_switch_accepts_common_truthy_values() {
+        for value in ["1", "true", "TRUE", "yes", "on", " on "] {
+            assert!(guide_enabled_from(Some(value)), "{value} should enable");
+        }
+        for value in [None, Some(""), Some("0"), Some("false"), Some("nope")] {
+            assert!(!guide_enabled_from(value), "{value:?} should not enable");
+        }
     }
 }

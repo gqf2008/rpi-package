@@ -27,6 +27,10 @@ pub const MAX_OUTPUT_BYTES: usize = 40_000;
 /// Turn budget env the host already enforces (`rpi-harness::run_budget`).
 pub const MAX_TURNS_ENV: &str = "RPI_MAX_TURNS_PER_RUN";
 
+/// Marker set on the child so the orchestrator guidance is not injected into a
+/// subagent (which does not have `plan`/`dispatch`).
+pub const SUBAGENT_ENV: &str = "RPI_ORCHESTRATOR_SUBAGENT";
+
 /// Build the child command. Separate from `run` so it is unit-testable without
 /// spawning anything.
 ///
@@ -55,6 +59,7 @@ pub fn child_command(
     command
         // Hard turn ceiling enforced by the harness, not the model.
         .env(MAX_TURNS_ENV, max_turns.to_string())
+        .env(SUBAGENT_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -191,7 +196,13 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(envs, vec![(MAX_TURNS_ENV.to_string(), "7".to_string())]);
+        assert_eq!(
+            envs,
+            vec![
+                (MAX_TURNS_ENV.to_string(), "7".to_string()),
+                (SUBAGENT_ENV.to_string(), "1".to_string()),
+            ]
+        );
     }
 
     #[test]
