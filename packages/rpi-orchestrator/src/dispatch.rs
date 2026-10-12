@@ -18,7 +18,7 @@ use crate::control::Control;
 use crate::graph::{Graph, Node, Status};
 use crate::kit::{progress, result_with_details, Progress};
 use crate::spawn;
-use crate::{graph_state, reported, running};
+use crate::{graph_state, running};
 use serde_json::Value;
 
 const DEFAULT_MAX_PARALLEL: usize = 4;
@@ -97,8 +97,8 @@ pub fn dispatch(
     }
 
     // ---- Collect. ----
-    let graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
-    let finished = take_finished(&graph);
+    let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
+    let finished = take_finished(&mut graph);
     let running_ids: Vec<String> = {
         let mut ids: Vec<String> = running()
             .lock()
@@ -136,25 +136,29 @@ pub fn dispatch(
 }
 
 /// Spawn a detached worker for one node. It runs the child, applies acceptance,
-/// commits the node's terminal state, and unregisters itself.
+/// commits the node's terminal state, and unregisters itself — guaranteed, even
+/// if the child logic panics, so a `dispatch` waiting for the running set to
+/// drain cannot hang forever.
 fn spawn_node_worker(id: String, node: Node, control: Control, progress_tx: Progress) {
     std::thread::spawn(move || {
         progress(&progress_tx, &format!("[dispatch] {id} running"));
-        let outcome = spawn::run(
-            &node.task,
-            node.max_turns,
-            node.timeout_secs,
-            node.provider.as_deref(),
-            node.model.as_deref(),
-            &control,
-        );
-        // Acceptance is only checked when the child reported success: a child that
-        // hit its turn cap still exits 0, so without this a no-op would be `done`.
-        let verified = match &outcome {
-            Ok(_) => verify_node(node.expect_file.as_deref(), node.verify.as_deref()),
-            Err(_) => Ok(()),
-        };
-        {
+        let cleanup_id = id.clone();
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let outcome = spawn::run(
+                &node.task,
+                node.max_turns,
+                node.timeout_secs,
+                node.provider.as_deref(),
+                node.model.as_deref(),
+                &control,
+            );
+            // Acceptance is only checked when the child reported success: a child
+            // that hit its turn cap still exits 0, so without this a no-op would
+            // be `done`.
+            let verified = match &outcome {
+                Ok(_) => verify_node(node.expect_file.as_deref(), node.verify.as_deref()),
+                Err(_) => Ok(()),
+            };
             let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
             if let Some(slot) = graph.get_mut(&id) {
                 match (outcome, verified) {
@@ -173,12 +177,24 @@ fn spawn_node_worker(id: String, node: Node, control: Control, progress_tx: Prog
                 }
             }
             graph.propagate_skips();
+        }));
+        if ran.is_err() {
+            // A panicked worker must still leave the node terminal, or it is stuck
+            // `running` and any draining wait never returns.
+            let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(slot) = graph.get_mut(&cleanup_id) {
+                if slot.status == Status::Running {
+                    slot.status = Status::Failed;
+                    slot.result = Some("node worker panicked".into());
+                }
+            }
+            graph.propagate_skips();
         }
         running()
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .remove(&id);
-        progress(&progress_tx, &format!("[dispatch] {id} finished"));
+            .remove(&cleanup_id);
+        progress(&progress_tx, &format!("[dispatch] {cleanup_id} finished"));
     });
 }
 
@@ -200,14 +216,15 @@ fn wait_for_drain(max: Option<Duration>) {
 }
 
 /// Terminal nodes whose result has not been returned yet, marking them reported.
-fn take_finished(graph: &Graph) -> Vec<Node> {
-    let mut reported = reported().lock().unwrap_or_else(|p| p.into_inner());
-    graph
-        .nodes
-        .iter()
-        .filter(|node| node.status.is_terminal() && reported.insert(node.id.clone()))
-        .cloned()
-        .collect()
+fn take_finished(graph: &mut Graph) -> Vec<Node> {
+    let mut out = Vec::new();
+    for node in &mut graph.nodes {
+        if node.status.is_terminal() && !node.reported {
+            node.reported = true;
+            out.push(node.clone());
+        }
+    }
+    out
 }
 
 /// Check a node's declared acceptance criteria after its child exits.
@@ -295,5 +312,23 @@ mod tests {
         let start = Instant::now();
         wait_for_drain(None);
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_result_is_reported_once_until_the_node_is_reset() {
+        // Guards the cursor: a fresh `plan set` / `reset` must be able to report a
+        // node again, so a reused node id cannot hide its result.
+        let mut graph =
+            Graph::from_nodes_value(&serde_json::json!([{"id": "a", "task": "x"}])).unwrap();
+        {
+            let node = graph.get_mut("a").unwrap();
+            node.status = Status::Done;
+            node.result = Some("ok".into());
+        }
+        assert_eq!(take_finished(&mut graph).len(), 1);
+        assert_eq!(take_finished(&mut graph).len(), 0, "reported once");
+
+        graph.get_mut("a").unwrap().reported = false;
+        assert_eq!(take_finished(&mut graph).len(), 1, "reset re-reports");
     }
 }

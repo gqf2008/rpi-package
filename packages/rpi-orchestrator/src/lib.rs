@@ -24,7 +24,7 @@ mod spawn;
 mod subagent;
 
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -32,7 +32,6 @@ use crate::control::Control;
 
 static GRAPH: OnceLock<Mutex<graph::Graph>> = OnceLock::new();
 static RUNNING: OnceLock<Mutex<HashMap<String, Control>>> = OnceLock::new();
-static REPORTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 /// Set when the host cancels a tool call (a run abort). Node workers link to this
 /// so an abort kills in-flight children, while a *normal* tool-call completion
@@ -52,12 +51,6 @@ pub(crate) fn node_control() -> Control {
 /// mid-wave `plan cancel` stop one node without stopping the whole call.
 pub(crate) fn running() -> &'static Mutex<HashMap<String, Control>> {
     RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Node ids whose terminal result has already been returned to the model, so
-/// repeated `dispatch` calls report each result exactly once.
-pub(crate) fn reported() -> &'static Mutex<HashSet<String>> {
-    REPORTED.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 /// The one in-memory graph. A poisoned lock is recovered rather than panicking,

@@ -26,7 +26,10 @@ pub fn plan(params: &Value, control: &Control, _progress: &Progress) -> Result<S
             let nodes = params
                 .get("nodes")
                 .ok_or("`nodes` is required for action=set")?;
-            *guard = Graph::from_nodes_value(nodes)?;
+            let graph = Graph::from_nodes_value(nodes)?;
+            // A new plan replaces the work in flight: stop whatever is running.
+            stop_all_running();
+            *guard = graph;
         }
         "update" => {
             let mut next = guard.clone();
@@ -123,9 +126,24 @@ fn apply_update(graph: &mut Graph, params: &Value) -> Result<(), String> {
             }
             node.status = Status::Pending;
             node.result = None;
+            node.reported = false;
         }
     }
     Ok(())
+}
+
+/// Cancel everything currently running and forget it — used when a new plan
+/// replaces the graph.
+fn stop_all_running() {
+    let controls: Vec<Control> = crate::running()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .drain()
+        .map(|(_, control)| control)
+        .collect();
+    for control in controls {
+        control.cancel();
+    }
 }
 
 /// Stop a node. A running node is signalled — its worker commits `failed`; a

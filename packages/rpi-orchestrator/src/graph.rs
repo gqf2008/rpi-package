@@ -57,6 +57,10 @@ pub struct Node {
     pub timeout_secs: u64,
     pub status: Status,
     pub result: Option<String>,
+    /// Whether this node's terminal result has already been returned to the
+    /// model. Lives on the node so a `reset` naturally re-reports it, and a fresh
+    /// `plan set` that reuses an id cannot hide its result behind a stale cursor.
+    pub reported: bool,
 }
 
 impl Node {
@@ -120,6 +124,7 @@ impl Node {
             timeout_secs,
             status: Status::Pending,
             result: None,
+            reported: false,
         })
     }
 
