@@ -66,7 +66,9 @@ Guards (all enforced in code, not asked of the model):
   so `poll` never blocks. Progress streams as a pending partial (per wave for
   `dispatch`), and cancelling the run kills the in-flight child **and its
   descendants** within ~100 ms — the tree is walked because nested shells
-  (rpi's own `bash` tool) put themselves in a new process group.
+  (rpi's own `bash` tool) put themselves in a new process group;
+- **no session litter**: children run with `--no-session`, so a wave does not
+  leave a ~2 MB session file per node in the parent's `.rpi/sessions/` directory.
 
 ### Provider / model passthrough
 

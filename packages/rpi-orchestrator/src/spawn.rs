@@ -53,6 +53,10 @@ pub fn child_command(
     let mut command = Command::new(exe);
     command
         .arg("-p")
+        // Ephemeral session: a one-shot worker has nothing to resume, and its
+        // session file would otherwise be written into the parent's project
+        // `.rpi/sessions/` directory — one ~2 MB file per delegation.
+        .arg("--no-session")
         // Recursion guard: the child must not offer `subagent`/`plan`/`dispatch`.
         .arg("--exclude-tools")
         .arg(EXCLUDED_TOOLS);
@@ -256,7 +260,10 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(args, vec!["-p", "--exclude-tools", EXCLUDED_TOOLS]);
+        assert_eq!(
+            args,
+            vec!["-p", "--no-session", "--exclude-tools", EXCLUDED_TOOLS]
+        );
 
         let envs: Vec<(String, String)> = command
             .get_envs()
@@ -294,6 +301,7 @@ mod tests {
             args,
             vec![
                 "-p",
+                "--no-session",
                 "--exclude-tools",
                 EXCLUDED_TOOLS,
                 "--provider",
@@ -309,7 +317,10 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(bare_args, vec!["-p", "--exclude-tools", EXCLUDED_TOOLS]);
+        assert_eq!(
+            bare_args,
+            vec!["-p", "--no-session", "--exclude-tools", EXCLUDED_TOOLS]
+        );
     }
 
     #[test]
