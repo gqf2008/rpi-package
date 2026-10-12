@@ -134,6 +134,8 @@ host: wait_timeout / tokio timeout -> kill              # 时长预算
 
 ## 11. 参考实现锚点
 
+协作架构图（与宿主 / `rpi-goal` / `rpi-mcp-adapter`）见 [`ARCHITECTURE.md`](ARCHITECTURE.md)。
+
 - 子进程 + 超时 + 截断：`rpi-package/packages/rpi-lens/src/lib.rs:25-70`
 - 状态存 `details` + 分支重放：`rpi-package/packages/rpi-todo`
 - 轮数/时长预算 + auto-pause + context 注入：`rpi-package/packages/rpi-goal`

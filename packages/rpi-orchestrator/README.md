@@ -5,7 +5,8 @@ Bounded subagent orchestration for the `rpi` Rust agent. A subagent is a child
 (parallel tool calls, results returned to the context), so this extension only
 adds the delegation primitive and, later, the DAG scheduler on top of it.
 
-Design and staged plan: [`DESIGN.md`](DESIGN.md).
+Design and staged plan: [`DESIGN.md`](DESIGN.md). How it collaborates with the
+host, `rpi-goal` and `rpi-mcp-adapter`: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Status
 
