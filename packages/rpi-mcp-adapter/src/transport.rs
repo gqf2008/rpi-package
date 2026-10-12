@@ -73,6 +73,7 @@ impl StdioTransport {
         args: &[String],
         env: &BTreeMap<String, String>,
         cwd: Option<&str>,
+        notifications: Option<SyncSender<Value>>,
     ) -> Result<Self, String> {
         let mut builder = Command::new(command);
         builder.args(args).envs(env);
@@ -118,18 +119,30 @@ impl StdioTransport {
                 match bounded_line(&mut reader) {
                     Ok(Some(line)) => {
                         // Service server requests even while no host call is polling.
-                        // Tool discovery is refreshed on each call, so list_changed
-                        // notifications do not need to accumulate in the response queue.
+                        // Method messages are either a request (has an id → reply) or a
+                        // notification (no id → hand to the dispatcher, which turns
+                        // e.g. `resources/updated` into a fresh read).
                         if let Ok(value) = serde_json::from_str::<Value>(&line) {
                             if value.get("method").is_some() && validate_message(&value).is_ok() {
-                                if let Some(reply) = client_reply(&value) {
-                                    let (done, ignored) = mpsc::sync_channel(1);
-                                    drop(ignored);
-                                    if replies.try_send((reply.to_string(), done)).is_err() {
-                                        let _ = sender.send(Err(
-                                            "MCP server request reply queue full or closed".into(),
-                                        ));
-                                        break;
+                                match client_reply(&value) {
+                                    Some(reply) => {
+                                        let (done, ignored) = mpsc::sync_channel(1);
+                                        drop(ignored);
+                                        if replies.try_send((reply.to_string(), done)).is_err() {
+                                            let _ = sender.send(Err(
+                                                "MCP server request reply queue full or closed"
+                                                    .into(),
+                                            ));
+                                            break;
+                                        }
+                                    }
+                                    // Never block the reader on the notification queue: a
+                                    // full queue drops the notification rather than stalling
+                                    // every response behind it.
+                                    None => {
+                                        if let Some(notifications) = &notifications {
+                                            let _ = notifications.try_send(value);
+                                        }
                                     }
                                 }
                                 continue;

@@ -1,12 +1,13 @@
 # rpi-mcp-adapter
 
 MCP tools for the RPI Rust extension ABI, with persistent stdio and Streamable
-HTTP connections. The host registers three stable tools:
+HTTP connections. The host registers four stable tools:
 
 - `mcp_list`: list configured servers or discover a server's tools and schemas;
 - `mcp_call`: call a discovered tool, preserving text/images and structured results;
+- `mcp_resource`: list, read, subscribe to, or unsubscribe from a server's resources;
 - `mcp_request`: send a raw HTTP JSON-RPC request for compatibility/diagnostics.
-  This low-level tool does not manage initialization; use the other two for normal MCP calls.
+  This low-level tool does not manage initialization; use the other tools for normal MCP calls.
 
 ## Configuration and discovery
 
@@ -58,6 +59,25 @@ tab still has stale rendered content. Then call `browser_take_screenshot` with a
 filename such as `.rpi/browser-output/lightbox.png`. In extension mode, a filename
 may resolve against the workspace directory, even with `--output-dir` configured.
 
+## Resources and live updates
+
+`mcp_resource` covers the MCP resource surface (read-only by spec — writing goes
+through a server's tools):
+
+```json
+{"configPath":".rpi/mcp.json","server":"docs","action":"list"}
+{"configPath":".rpi/mcp.json","server":"docs","action":"read","uri":"file:///README.md"}
+{"configPath":".rpi/mcp.json","server":"docs","action":"subscribe","uri":"file:///README.md"}
+{"configPath":".rpi/mcp.json","server":"docs","action":"unsubscribe","uri":"file:///README.md"}
+```
+
+A subscribed server pushes `notifications/resources/updated`. The adapter reads
+the resource and shows the new content to the model as a message at the next turn
+boundary (`TurnEnd`) — never mid tool batch, so an assistant `tool_calls` message
+stays adjacent to its `toolResult`s. Updates are queued per connection (last 64)
+and only read for URIs you actually subscribed to. This works for stdio servers
+today; HTTP/SSE push is not wired yet.
+
 ## Connections, bounds and cancellation
 
 Connections are isolated by host session ID and canonical config path/server name
@@ -95,10 +115,12 @@ the original result, including structured content, is retained in result details
 
 ## Scope and validation
 
-The stable dispatcher avoids runtime tool registration. Resources, prompts,
-sampling, elicitation, OAuth, and automatic dynamic tool registration are not
-implemented. `exposure` is parsed for configuration compatibility; the stable
-dispatcher does not implement Pi's dynamic exposure modes.
+The stable dispatcher avoids runtime tool registration. Prompts, sampling,
+elicitation, OAuth, and automatic dynamic tool registration are not implemented;
+resources are supported through `mcp_resource`, but resource updates over
+HTTP/SSE push are not wired yet. `exposure` is parsed for configuration
+compatibility; the stable dispatcher does not implement Pi's dynamic exposure
+modes.
 
 Run `cargo test -p rpi-mcp-adapter` and
 `cargo clippy -p rpi-mcp-adapter --all-targets -- -D warnings`.

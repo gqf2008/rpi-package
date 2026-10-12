@@ -68,6 +68,7 @@ fn stdio_timeout_bounds_unresponsive_server() {
         &["--hang".into()],
         &Default::default(),
         None,
+        None,
     )
     .unwrap();
     transport.set_timeout(1);
@@ -88,6 +89,7 @@ fn stdio_skips_notifications_before_response() {
         env!("CARGO_BIN_EXE_fake_mcp_server"),
         &["--notify".into()],
         &Default::default(),
+        None,
         None,
     )
     .unwrap();
@@ -146,6 +148,7 @@ fn timeout_covers_a_full_stdin_pipe() {
         &["--no-read".into()],
         &Default::default(),
         None,
+        None,
     )
     .unwrap();
     transport.set_timeout(1);
@@ -167,6 +170,7 @@ fn cancellation_interrupts_pipe_write_and_cleans_workers() {
         env!("CARGO_BIN_EXE_fake_mcp_server"),
         &["--no-read".into()],
         &Default::default(),
+        None,
         None,
     )
     .unwrap();
@@ -210,6 +214,7 @@ fn oversize_unterminated_stdout_is_rejected() {
         &["--oversize".into()],
         &Default::default(),
         None,
+        None,
     )
     .unwrap();
     transport.set_timeout(5);
@@ -235,6 +240,7 @@ fn timeout_kills_descendants_holding_inherited_pipes() {
         env!("CARGO_BIN_EXE_fake_mcp_server"),
         &["--spawn-child".into()],
         &Default::default(),
+        None,
         None,
     )
     .unwrap();

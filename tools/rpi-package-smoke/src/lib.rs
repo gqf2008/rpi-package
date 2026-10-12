@@ -30,6 +30,7 @@ mod tests {
             "code_lens",
             "delegate_task",
             "mcp_request",
+            "mcp_resource",
             "codegraph",
             "todo",
             "goal",

@@ -46,12 +46,12 @@ pub fn parse_initialize(response: Response) -> Result<ServerInfo, String> {
             "unsupported MCP protocol version {protocol_version:?}"
         ));
     }
-    if result
-        .get("capabilities")
-        .and_then(|v| v.get("tools"))
-        .is_none()
+    let capabilities = result.get("capabilities");
+    if !["tools", "resources", "prompts"]
+        .iter()
+        .any(|name| capabilities.and_then(|c| c.get(name)).is_some())
     {
-        return Err("MCP server does not advertise the tools capability".into());
+        return Err("MCP server advertises no tools, resources or prompts capability".into());
     }
     let info = result
         .get("serverInfo")

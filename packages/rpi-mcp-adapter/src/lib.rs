@@ -63,6 +63,75 @@ fn mcp_request(params: &Value, control: &Control) -> Result<Value, String> {
     Ok(kit::text_result(result.to_string()))
 }
 
+static RUNTIME: std::sync::OnceLock<rpi_plugin_sdk::PluginApi> = std::sync::OnceLock::new();
+
+/// Dispatch a host runtime action (used to append the resource-update message).
+fn call_runtime(id: rpi_plugin_sdk::RuntimeActionId, args: Value) -> Result<Value, String> {
+    let runtime = *RUNTIME.get().ok_or("mcp runtime unavailable")?;
+    let mut out = rpi_plugin_sdk::StbString::empty();
+    // Bind the JSON to a local: `StbStringRef` borrows it for the call, so an
+    // inline `&args.to_string()` would drop the buffer immediately and hand the
+    // host a dangling pointer.
+    let input_json = args.to_string();
+    let input = rpi_plugin_sdk::StbStringRef::from_str(&input_json);
+    let rc = (runtime.runtime_action)(id.into(), input, &mut out, runtime.user_data);
+    let text = out.to_string_lossy();
+    (runtime.free_string)(out);
+    if rc != 0 {
+        return Err(if text.is_empty() {
+            "runtime action failed".into()
+        } else {
+            text
+        });
+    }
+    if text.trim().is_empty() {
+        Ok(Value::Null)
+    } else {
+        serde_json::from_str(&text).map_err(|e| format!("invalid runtime response: {e}"))
+    }
+}
+
+fn mcp_resource(params: &Value, control: &Control) -> Result<Value, String> {
+    Ok(kit::text_result(
+        runtime::resources(params, control)?.to_string(),
+    ))
+}
+
+/// TurnEnd: surface any resource updates read since the last turn. TurnEnd is a
+/// turn boundary, so the appended message never splits an assistant `tool_calls`
+/// from its `toolResult`s (the HTTP 400 that motivated this timing).
+extern "C" fn turn_end(_: rpi_plugin_sdk::StablePluginEvent, _: *mut std::ffi::c_void) -> i32 {
+    let updates = std::panic::catch_unwind(runtime::take_pending_updates).unwrap_or_default();
+    if updates.is_empty() {
+        return 0;
+    }
+    let mut text = String::from("🔔 MCP resource update(s):");
+    for update in &updates {
+        text.push_str(&format!(
+            "\n\n--- {} (server {})\n{}",
+            update.uri, update.key, update.text
+        ));
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let message = json!({
+        "kind": "custom",
+        "role": "custom",
+        "content": [{"type":"text","text": text}],
+        "data": {"customType": "mcp-resources", "display": true},
+        "timestamp": timestamp,
+    });
+    match call_runtime(
+        rpi_plugin_sdk::RuntimeActionId::AppendEntry,
+        json!({"message": message}),
+    ) {
+        Ok(_) => 0,
+        Err(_) => 1,
+    }
+}
+
 macro_rules! tool_entry {
     ($execute:ident, $builder:ident) => {
         extern "C" fn $execute(
@@ -77,6 +146,7 @@ macro_rules! tool_entry {
 tool_entry!(call_execute, mcp_call);
 tool_entry!(list_execute, mcp_list);
 tool_entry!(request_execute, mcp_request);
+tool_entry!(resource_execute, mcp_resource);
 extern "C" fn tool_poll(
     handle: rpi_plugin_sdk::StepHandle,
     callback: Option<rpi_plugin_sdk::ToolPartialCb>,
@@ -105,13 +175,15 @@ rpi_plugin_sdk::export_plugin!(|api| {
     };
     // A reload must not leave old workers or sessions owned by this DLL.
     shutdown_connections();
-    let tools: [(&str, &str, &str, rpi_plugin_sdk::ToolExecuteFn); 3] = [
+    let tools: [(&str, &str, &str, rpi_plugin_sdk::ToolExecuteFn); 4] = [
     ("mcp_request", "Send a raw HTTP JSON-RPC request. For managed MCP sessions use mcp_call or mcp_list.",
      r#"{"type":"object","properties":{"url":{"type":"string"},"method":{"type":"string"},"params":{},"id":{"type":["string","integer"]},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":300}},"required":["url","method"]}"#, request_execute),
     ("mcp_call", "Call a tool using a persistent stdio or HTTP MCP connection. Use mcp_list to discover tool names and argument schemas. Supply configPath and server, or url.",
      r#"{"type":"object","properties":{"url":{"type":"string"},"configPath":{"type":"string"},"server":{"type":"string"},"tool":{"type":"string"},"arguments":{"type":"object"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":300}},"required":["tool"],"oneOf":[{"required":["configPath","server"],"not":{"required":["url"]}},{"required":["url"],"not":{"anyOf":[{"required":["configPath"]},{"required":["server"]}]}}]}"#, call_execute),
     ("mcp_list", "List configured MCP servers, or discover a server's tools and argument schemas. Set action=close to release a server connection. Supply configPath, configPath/server, or url.",
      r#"{"type":"object","properties":{"url":{"type":"string"},"configPath":{"type":"string"},"server":{"type":"string"},"action":{"type":"string","enum":["list","close"]},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":300}},"oneOf":[{"required":["configPath"],"not":{"required":["url"]}},{"required":["url"],"not":{"anyOf":[{"required":["configPath"]},{"required":["server"]}]}}]}"#, list_execute),
+    ("mcp_resource", "List, read, subscribe to, or unsubscribe from an MCP server's resources. Subscribing makes the server push resources/updated notifications, which are read and shown to you at the next turn. Supply configPath+server, or url.",
+     r#"{"type":"object","properties":{"url":{"type":"string"},"configPath":{"type":"string"},"server":{"type":"string"},"action":{"type":"string","enum":["list","read","subscribe","unsubscribe"]},"uri":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":300}},"oneOf":[{"required":["configPath"],"not":{"required":["url"]}},{"required":["url"],"not":{"anyOf":[{"required":["configPath"]},{"required":["server"]}]}}]}"#, resource_execute),
 ];
     for (name, description, parameters, execute) in tools {
         let schema = kit::schema(name, description, parameters);
@@ -129,14 +201,28 @@ rpi_plugin_sdk::export_plugin!(|api| {
             return rc;
         }
     }
-    // SessionShutdown is a marker without session identity: release all connections
-    // in this extension instance, including library-scope fallback connections.
+    // Remember the host API so the TurnEnd handler can append resource updates.
+    let _ = RUNTIME.set(*api);
     if let Some(register) = api.register_event_handler {
-        return register(
+        // SessionShutdown is a marker without session identity: release all
+        // connections in this extension instance.
+        if register(
             rpi_plugin_sdk::EventTag::SessionShutdown,
             session_shutdown,
             std::ptr::null_mut(),
-        );
+        ) != 0
+        {
+            return 1;
+        }
+        // TurnEnd: show resource updates read since the last turn (a safe boundary).
+        if register(
+            rpi_plugin_sdk::EventTag::TurnEnd,
+            turn_end,
+            std::ptr::null_mut(),
+        ) != 0
+        {
+            return 1;
+        }
     }
     0
 });

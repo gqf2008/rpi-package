@@ -9,6 +9,7 @@ use crate::{McpConfig, McpServerConfig, Request, Response, ServerInfo, StdioTran
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,7 +53,12 @@ struct Session {
     failed: bool,
 }
 impl Session {
-    fn start(config: &McpServerConfig, timeout: u64, control: &Control) -> Result<Self, String> {
+    fn start(
+        config: &McpServerConfig,
+        timeout: u64,
+        control: &Control,
+        notifications: &SyncSender<Value>,
+    ) -> Result<Self, String> {
         control.check()?;
         let mut transport = match config {
             McpServerConfig::Stdio(s) => Transport::Stdio(StdioTransport::start(
@@ -60,6 +66,7 @@ impl Session {
                 &s.args,
                 &s.env,
                 s.cwd.as_deref(),
+                Some(notifications.clone()),
             )?),
             McpServerConfig::Http(s) => Transport::Http(HttpTransport::new(s)?),
         };
@@ -130,11 +137,246 @@ impl Session {
 struct Entry {
     session: Mutex<Option<Session>>,
     stop: Control,
+    /// Notifications from this connection's reader, consumed by its dispatcher.
+    /// Owned by the entry so a re-opened session reuses the same dispatcher.
+    notifications: SyncSender<Value>,
 }
 type Sessions = BTreeMap<String, Arc<Entry>>;
 static SESSIONS: OnceLock<Mutex<Sessions>> = OnceLock::new();
 fn sessions() -> &'static Mutex<Sessions> {
     SESSIONS.get_or_init(Default::default)
+}
+
+// ---------------------------------------------------------------------------
+// Resource subscriptions and pushed updates
+// ---------------------------------------------------------------------------
+
+/// Subscribed resource URIs, per connection key.
+static SUBSCRIPTIONS: OnceLock<Mutex<std::collections::HashMap<String, HashSet<String>>>> =
+    OnceLock::new();
+fn subscriptions() -> &'static Mutex<std::collections::HashMap<String, HashSet<String>>> {
+    SUBSCRIPTIONS.get_or_init(Default::default)
+}
+
+/// A resource read in response to `notifications/resources/updated`, waiting to
+/// be shown to the model. Drained at the turn boundary (`TurnEnd`) so injection
+/// never splits an assistant `tool_calls` from its `toolResult`s.
+#[derive(Debug, Clone)]
+pub(crate) struct ResourceUpdate {
+    pub key: String,
+    pub uri: String,
+    pub text: String,
+}
+static PENDING: OnceLock<Mutex<Vec<ResourceUpdate>>> = OnceLock::new();
+fn pending() -> &'static Mutex<Vec<ResourceUpdate>> {
+    PENDING.get_or_init(Default::default)
+}
+const MAX_PENDING: usize = 64;
+const MAX_RESOURCE_TEXT: usize = 20_000;
+
+pub(crate) fn take_pending_updates() -> Vec<ResourceUpdate> {
+    std::mem::take(&mut *pending().lock().unwrap_or_else(|p| p.into_inner()))
+}
+
+fn add_subscription(key: &str, uri: &str) {
+    if let Ok(mut map) = subscriptions().lock() {
+        map.entry(key.to_string())
+            .or_default()
+            .insert(uri.to_string());
+    }
+}
+fn remove_subscription(key: &str, uri: &str) {
+    if let Ok(mut map) = subscriptions().lock() {
+        if let Some(set) = map.get_mut(key) {
+            set.remove(uri);
+            if set.is_empty() {
+                map.remove(key);
+            }
+        }
+    }
+}
+fn clear_subscriptions(key: &str) {
+    if let Ok(mut map) = subscriptions().lock() {
+        map.remove(key);
+    }
+}
+fn is_subscribed(key: &str, uri: &str) -> bool {
+    subscriptions()
+        .lock()
+        .map(|map| map.get(key).is_some_and(|set| set.contains(uri)))
+        .unwrap_or(false)
+}
+
+/// One dispatcher per connection. It ends when every sender is gone (entry
+/// removed and session dropped).
+fn spawn_dispatcher(key: String, receiver: Receiver<Value>) {
+    let _ = std::thread::Builder::new()
+        .name("mcp-notify".into())
+        .spawn(move || {
+            while let Ok(value) = receiver.recv() {
+                dispatch_notification(&key, &value);
+            }
+        });
+}
+
+fn dispatch_notification(key: &str, value: &Value) {
+    let method = value
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if method != "notifications/resources/updated" {
+        return;
+    }
+    let Some(uri) = value
+        .get("params")
+        .and_then(|params| params.get("uri"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return;
+    };
+    if !is_subscribed(key, &uri) {
+        return;
+    }
+    if let Ok(text) = read_resource_by_key(key, &uri) {
+        let mut pending = pending().lock().unwrap_or_else(|p| p.into_inner());
+        if pending.len() < MAX_PENDING {
+            pending.push(ResourceUpdate {
+                key: key.to_string(),
+                uri,
+                text,
+            });
+        }
+    }
+}
+
+/// Read a resource on an existing connection (used by the dispatcher). Never
+/// creates a session: if the connection is gone, the update is dropped. Runs on
+/// the dispatcher thread, not the reader, so it can await the reply.
+fn read_resource_by_key(key: &str, uri: &str) -> Result<String, String> {
+    let entry = sessions()
+        .lock()
+        .map_err(|_| "MCP session registry poisoned")?
+        .get(key)
+        .cloned()
+        .ok_or("MCP connection is gone")?;
+    let control = Control::default();
+    let deadline = Deadline::new(120, "resources/read", &control);
+    let mut state = lock_until(&entry.session, &deadline)?;
+    let session = state.as_mut().ok_or("MCP connection is closed")?;
+    let result =
+        response_result(session.request("resources/read", json!({"uri": uri}), &control)?)?;
+    Ok(resource_text(&result))
+}
+
+/// Flatten a `resources/read` result's `contents` into text (blobs are noted by
+/// size, not inlined).
+fn resource_text(result: &Value) -> String {
+    let Some(contents) = result.get("contents").and_then(Value::as_array) else {
+        return result.to_string();
+    };
+    let mut out = String::new();
+    for item in contents {
+        let uri = item.get("uri").and_then(Value::as_str).unwrap_or("");
+        let body = if let Some(text) = item.get("text").and_then(Value::as_str) {
+            text.to_string()
+        } else if let Some(blob) = item.get("blob").and_then(Value::as_str) {
+            format!("[blob, {} base64 chars]", blob.len())
+        } else {
+            continue;
+        };
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("{uri}\n{body}"));
+    }
+    if out.len() > MAX_RESOURCE_TEXT {
+        let mut end = MAX_RESOURCE_TEXT;
+        while end > 0 && !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+        out.push_str("\n[truncated]");
+    }
+    out
+}
+
+/// `resources/list` | `read` | `subscribe` | `unsubscribe`.
+pub(crate) fn resources(params: &Value, control: &Control) -> Result<Value, String> {
+    control.check()?;
+    let action = params
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("list");
+    if !matches!(action, "list" | "read" | "subscribe" | "unsubscribe") {
+        return Err("mcp_resource action must be list, read, subscribe or unsubscribe".into());
+    }
+    let (key, name, config, timeout) = target(params)?;
+
+    if action == "list" {
+        return with_session(key, config, timeout, control, |session, control| {
+            let mut resources = Vec::new();
+            let mut cursor = None;
+            let mut seen = HashSet::new();
+            for _ in 0..100 {
+                let params = cursor
+                    .as_ref()
+                    .map(|c| json!({"cursor": c}))
+                    .unwrap_or_else(|| json!({}));
+                let result =
+                    response_result(session.request("resources/list", params, control)?)?;
+                if let Some(items) = result.get("resources").and_then(Value::as_array) {
+                    resources.extend(items.iter().cloned());
+                }
+                if resources.len() > 16_384 {
+                    return Err("MCP resource list exceeded 16384 resources".into());
+                }
+                match result.get("nextCursor") {
+                    None => break,
+                    Some(Value::String(next)) => {
+                        if !seen.insert(next.clone()) {
+                            return Err(
+                                "MCP resources/list returned a repeated pagination cursor".into()
+                            );
+                        }
+                        cursor = Some(next.clone());
+                    }
+                    _ => return Err("MCP resources/list nextCursor must be a string".into()),
+                }
+            }
+            Ok(json!({"server": name, "resources": resources}))
+        });
+    }
+
+    let uri = crate::kit::string_param(params, "uri")?;
+    if action == "unsubscribe" {
+        let _ = with_session(key.clone(), config, timeout, control, |session, control| {
+            response_result(session.request(
+                "resources/unsubscribe",
+                json!({"uri": uri}),
+                control,
+            )?)
+        });
+        remove_subscription(&key, &uri);
+        return Ok(json!({"server": name, "uri": uri, "unsubscribed": true}));
+    }
+    if action == "subscribe" {
+        with_session(key.clone(), config, timeout, control, |session, control| {
+            response_result(session.request("resources/subscribe", json!({"uri": uri}), control)?)
+        })?;
+        add_subscription(&key, &uri);
+        return Ok(json!({"server": name, "uri": uri, "subscribed": true}));
+    }
+    // read
+    with_session(key, config, timeout, control, |session, control| {
+        let result =
+            response_result(session.request("resources/read", json!({"uri": uri}), control)?)?;
+        Ok(json!({
+            "server": name,
+            "uri": uri,
+            "contents": result.get("contents").cloned().unwrap_or(Value::Null),
+        }))
+    })
 }
 
 fn lock_until<'a, T>(
@@ -164,15 +406,20 @@ fn with_session<T>(
         if !sessions.contains_key(&key) && sessions.len() >= 64 {
             return Err("MCP connection limit (64) reached; close unused connections with mcp_list action=close".into());
         }
-        sessions
-            .entry(key)
-            .or_insert_with(|| {
-                Arc::new(Entry {
+        match sessions.get(&key) {
+            Some(entry) => entry.clone(),
+            None => {
+                let (notifications, receiver) = mpsc::sync_channel(64);
+                spawn_dispatcher(key.clone(), receiver);
+                let entry = Arc::new(Entry {
                     session: Mutex::new(None),
                     stop: Control::default(),
-                })
-            })
-            .clone()
+                    notifications,
+                });
+                sessions.insert(key.clone(), Arc::clone(&entry));
+                entry
+            }
+        }
     };
     let control = control.linked(&entry.stop);
     let deadline = Deadline::new(timeout, "connection lock", &control);
@@ -181,7 +428,12 @@ fn with_session<T>(
         state.take();
     }
     if state.is_none() {
-        *state = Some(Session::start(&config, timeout, &control)?);
+        *state = Some(Session::start(
+            &config,
+            timeout,
+            &control,
+            &entry.notifications,
+        )?);
     }
     let session = state.as_mut().ok_or("MCP session unavailable")?;
     session.transport.timeout(timeout);
@@ -193,6 +445,9 @@ fn with_session<T>(
 }
 
 pub fn shutdown_connections() {
+    if let Ok(mut subs) = subscriptions().lock() {
+        subs.clear();
+    }
     let entries = if let Ok(mut map) = sessions().lock() {
         std::mem::take(&mut *map)
     } else {
@@ -208,6 +463,7 @@ pub fn shutdown_connections() {
     }
 }
 fn close_key(key: &str) -> Result<(), String> {
+    clear_subscriptions(key);
     let entry = sessions()
         .lock()
         .map_err(|_| "MCP session registry poisoned")?
@@ -447,4 +703,20 @@ pub fn close_from_config(config_path: &str, server_name: &str) -> Result<(), Str
         &Control::default(),
     )
     .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resource_text;
+    use serde_json::json;
+
+    #[test]
+    fn resource_text_flattens_text_and_notes_blobs() {
+        let text = resource_text(&json!({"contents": [
+            {"uri": "res://a", "mimeType": "text/plain", "text": "hello"},
+            {"uri": "res://b", "blob": "QUJD"}]}));
+        assert!(text.contains("res://a"));
+        assert!(text.contains("hello"));
+        assert!(text.contains("[blob, 4 base64 chars]"), "got: {text}");
+    }
 }
