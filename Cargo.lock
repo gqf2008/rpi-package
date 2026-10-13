@@ -1179,6 +1179,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiqi-plugin"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1880,7 +1888,7 @@ dependencies = [
 name = "rpi-acp"
 version = "0.1.2"
 dependencies = [
- "rpi-plugin-sdk 0.3.20",
+ "rpi-plugin-sdk 0.4.0",
  "serde",
  "serde_json",
  "tokio",
@@ -1891,7 +1899,7 @@ dependencies = [
 name = "rpi-ask-user"
 version = "0.1.5"
 dependencies = [
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "serde_json",
 ]
 
@@ -1899,7 +1907,7 @@ dependencies = [
 name = "rpi-codegraph"
 version = "0.1.5"
 dependencies = [
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "serde_json",
 ]
 
@@ -1907,7 +1915,7 @@ dependencies = [
 name = "rpi-goal"
 version = "0.1.6"
 dependencies = [
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "serde",
  "serde_json",
 ]
@@ -1918,7 +1926,7 @@ version = "0.1.10"
 dependencies = [
  "feishu-sdk",
  "regex",
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "rustls",
  "serde_json",
  "tokio",
@@ -1930,7 +1938,7 @@ name = "rpi-langfuse"
 version = "0.4.1"
 dependencies = [
  "reqwest 0.12.28",
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "serde",
  "serde_json",
 ]
@@ -1939,7 +1947,7 @@ dependencies = [
 name = "rpi-lens"
 version = "0.1.4"
 dependencies = [
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "serde_json",
  "wait-timeout",
 ]
@@ -1949,7 +1957,7 @@ name = "rpi-mcp-adapter"
 version = "0.2.0"
 dependencies = [
  "reqwest 0.12.28",
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "serde",
  "serde_json",
  "tokio",
@@ -1972,7 +1980,7 @@ dependencies = [
 name = "rpi-permission-gate"
 version = "0.1.0"
 dependencies = [
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "serde_json",
 ]
 
@@ -1980,7 +1988,7 @@ dependencies = [
 name = "rpi-permissions"
 version = "0.1.4"
 dependencies = [
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "serde_json",
 ]
 
@@ -1988,24 +1996,22 @@ dependencies = [
 name = "rpi-plan-mode"
 version = "0.1.5"
 dependencies = [
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "serde_json",
 ]
 
 [[package]]
 name = "rpi-plugin-sdk"
-version = "0.3.20"
+version = "0.3.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88064b24428c5c5a5d3ee93616a754d171951fb8b31edbc55530433359047d85"
+checksum = "31424e96190e22cc1153425dfc514141e093b6121b7727c9af1ea30fc253fe28"
 dependencies = [
- "libc",
  "serde_json",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "rpi-plugin-sdk"
-version = "0.3.21"
+version = "0.4.0"
 dependencies = [
  "libc",
  "serde_json",
@@ -2016,7 +2022,7 @@ dependencies = [
 name = "rpi-run-stats"
 version = "0.1.1"
 dependencies = [
- "rpi-plugin-sdk 0.3.20",
+ "rpi-plugin-sdk 0.3.22",
  "serde_json",
 ]
 
@@ -2025,7 +2031,7 @@ name = "rpi-server"
 version = "0.3.4"
 dependencies = [
  "async-trait",
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "serde",
  "serde_json",
  "tokio",
@@ -2035,7 +2041,7 @@ dependencies = [
 name = "rpi-subagents"
 version = "0.1.4"
 dependencies = [
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "serde_json",
 ]
 
@@ -2043,7 +2049,8 @@ dependencies = [
 name = "rpi-todo"
 version = "0.2.2"
 dependencies = [
- "rpi-plugin-sdk 0.3.21",
+ "kiqi-plugin",
+ "rpi-plugin-sdk 0.4.0",
  "serde_json",
 ]
 
@@ -2057,7 +2064,7 @@ dependencies = [
  "native-tls",
  "reqwest 0.12.28",
  "rodio",
- "rpi-plugin-sdk 0.3.20",
+ "rpi-plugin-sdk 0.3.22",
  "serde",
  "serde_json",
  "sha2",
@@ -2074,7 +2081,7 @@ name = "rpi-webfetch"
 version = "0.1.4"
 dependencies = [
  "reqwest 0.12.28",
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "serde_json",
  "url",
 ]
@@ -2084,7 +2091,7 @@ name = "rpi-websearch"
 version = "0.1.4"
 dependencies = [
  "reqwest 0.12.28",
- "rpi-plugin-sdk 0.3.21",
+ "rpi-plugin-sdk 0.4.0",
  "serde_json",
  "url",
 ]
