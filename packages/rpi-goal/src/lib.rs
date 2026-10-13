@@ -62,10 +62,10 @@ fn flush_pending_inject() {
 /// therefore its `.rpi/goals.json` — so its turns must not be counted against
 /// the parent's goal budget.
 ///
-/// `RPI_ORCHESTRATOR_SUBAGENT` is rpi-orchestrator's marker; the `LANGFUSE_*` one
+/// `KI_ORCHESTRATOR_SUBAGENT` is rpi-orchestrator's marker; the `LANGFUSE_*` one
 /// is the SDK's cross-repo "I am a subagent" contract
 /// ([`rpi_plugin_sdk::SUBAGENT_PARENT_TRACE_ID_ENV`]).
-const ORCHESTRATOR_SUBAGENT_ENV: &str = "RPI_ORCHESTRATOR_SUBAGENT";
+const ORCHESTRATOR_SUBAGENT_ENV: &str = "KI_ORCHESTRATOR_SUBAGENT";
 
 fn is_subagent_from(orchestrator_marker: bool, langfuse_parent: bool) -> bool {
     orchestrator_marker || langfuse_parent
