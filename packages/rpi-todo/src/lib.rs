@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 
+pub mod kiqi;
+
 const TOOL: &str = "todo";
 
 // Reuse the SDK's host-context lifetime and thread-safety contract.
@@ -57,7 +59,7 @@ fn call_runtime(id: RuntimeActionId, args: Value) -> Result<Value, String> {
     }
 }
 
-fn parse_todos(value: &Value) -> Option<TodoState> {
+pub(crate) fn parse_todos(value: &Value) -> Option<TodoState> {
     let todos = value.get("todos")?.as_array()?;
     let mut result = Vec::new();
     let mut next_id = value.get("nextId").and_then(Value::as_u64).unwrap_or(1);
@@ -81,7 +83,7 @@ fn parse_todos(value: &Value) -> Option<TodoState> {
     })
 }
 
-fn state_json(state: &TodoState) -> Value {
+pub(crate) fn state_json(state: &TodoState) -> Value {
     json!({"todos": state.todos.iter().map(|todo| json!({"id":todo.id,"text":todo.text,"done":todo.done,"status":if todo.done {"completed"} else if todo.in_progress {"in_progress"} else {"pending"}})).collect::<Vec<_>>(), "nextId": state.next_id})
 }
 
@@ -129,7 +131,7 @@ fn handle_event(event, _user_data) {
 }
 }
 
-fn render(state: &TodoState, include_done: bool) -> String {
+pub(crate) fn render(state: &TodoState, include_done: bool) -> String {
     if state.todos.is_empty() {
         return "No todos".into();
     }
@@ -161,7 +163,7 @@ fn result(action: &str, state: &TodoState, text: String, error: Option<&str>) ->
     json!({"content":[{"type":"text","text":text}],"details":details}).to_string()
 }
 
-fn todo(params: &Value) -> Result<String, String> {
+pub(crate) fn todo(params: &Value) -> Result<String, String> {
     let action = params
         .get("action")
         .and_then(Value::as_str)

@@ -16,4 +16,5 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 rpi-plugin-sdk = { version = "0.3.16", path = "../../../pi-rust/crates/rpi-plugin-sdk" }
+kiqi-plugin = { path = "../../../pi-rust/crates/kiqi-plugin" }
 serde_json = { workspace = true }
