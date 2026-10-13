@@ -27,11 +27,11 @@ pub const EXCLUDED_TOOLS: &str = "subagent,plan,dispatch";
 pub const MAX_OUTPUT_BYTES: usize = 40_000;
 
 /// Turn budget env the host already enforces (`rpi-harness::run_budget`).
-pub const MAX_TURNS_ENV: &str = "RPI_MAX_TURNS_PER_RUN";
+pub const MAX_TURNS_ENV: &str = "KI_MAX_TURNS_PER_RUN";
 
 /// Marker set on the child so the orchestrator guidance is not injected into a
 /// subagent (which does not have `plan`/`dispatch`).
-pub const SUBAGENT_ENV: &str = "RPI_ORCHESTRATOR_SUBAGENT";
+pub const SUBAGENT_ENV: &str = "KI_ORCHESTRATOR_SUBAGENT";
 
 /// How often the wait loop re-checks cancellation/timeout. Bounds how long a
 /// cancelled call can keep a child alive.

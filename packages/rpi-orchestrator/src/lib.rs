@@ -86,7 +86,7 @@ const DISPATCH_PARAMS: &str = r#"{"type":"object","properties":{"maxParallel":{"
 /// implies orchestration, so no variable is needed. This only forces the decision:
 /// `0/false/no/off` disables it even with a goal, `1/true/yes/on` enables it even
 /// without one.
-pub const GUIDE_ENV: &str = "RPI_ORCHESTRATOR_GUIDE";
+pub const GUIDE_ENV: &str = "KI_ORCHESTRATOR_GUIDE";
 
 /// Project-relative path of `rpi-goal`'s state. An active goal there is what turns
 /// the guidance on — a deliberate coupling to `/goal` mode.
